@@ -1,0 +1,44 @@
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+UserSettings/
+MemoryCaptures/
+.vs/
+.idea/
+*.csproj
+*.unityproj
+*.sln
+*.suo
+*.tmp
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+*.pidb.meta
+*.bak
+*.swp
+*.tmp
+*.orig
+*.rej
+*.log
+
+# JetBrains Rider
+.idea/
+*.sln.iml
+
+# Unity Cloud Build
+/[Uu]serSettings.asset
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+Assets/Resources/openai_key.txt
