@@ -10,7 +10,7 @@ The project serves as a living prototype for a master’s thesis on conversation
 | **Engine**       | Unity 6000.0.39f1                                     |
 | **VR SDK**       | OpenXR (Meta Quest 2 target)                          |
 | **Neural Inference** | Unity Sentis (GPU Compute backend)                   |
-| **Vision Model** | YOLOv8-Nano ONNX (custom-trained models pluggable)    |
+| **Vision Model** | YOLO11n ONNX                                         |
 | **LLM Backend**  | OpenAI API                                           |
 | **Audio I/O**    | Wit.ai Speech-to-Text / Text-to-Speech                |
 | **Scripting**    | C# (.NET Standard 2.1)                                |
