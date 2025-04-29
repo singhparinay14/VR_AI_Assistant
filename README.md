@@ -14,7 +14,7 @@ The project serves as a living prototype for a master’s thesis on conversation
 | **Neural Inference** | Unity Sentis (GPU Compute backend)                   |
 | **Vision Model** | YOLO11n ONNX                                         |
 | **LLM Backend**  | OpenAI API                                           |
-| **Audio I/O**    | Wit.ai Speech-to-Text / Text-to-Speech                |
+| **Audio I/O**    | Speech-to-Text / Text-to-Speech                |
 | **Scripting**    | C# (.NET Standard 2.1)                                |
 
 Made with ❤️ for immersive AI research.
