@@ -9,6 +9,7 @@ public class OpenAITTS : MonoBehaviour
 {
     private string openAI_APIKey;
     public AudioSource audioSource;
+    private bool isSpeaking = false; // Added: prevent overlapping calls
 
     private void Awake()
     {
@@ -25,6 +26,14 @@ public class OpenAITTS : MonoBehaviour
 
     public IEnumerator SpeakText(string text)
     {
+        if (isSpeaking)
+        {
+            Debug.LogWarning("TTS is already playing. Wait before making another request.");
+            yield break;
+        }
+
+        isSpeaking = true;
+
         TTSRequest requestData = new TTSRequest { input = text };
         string json = JsonConvert.SerializeObject(requestData);
 
@@ -34,20 +43,31 @@ public class OpenAITTS : MonoBehaviour
         request.downloadHandler = new DownloadHandlerBuffer();
 
         request.SetRequestHeader("Content-Type", "application/json");
-        request.SetRequestHeader("Authorization", $"Bearer {openAI_APIKey}");
+        request.SetRequestHeader("Authorization", "Bearer " + openAI_APIKey);
 
         yield return request.SendWebRequest();
+
+        if (request.responseCode == 429)
+        {
+            Debug.LogError("TTS Error: Rate limit hit (429 Too Many Requests). Retrying in 2 seconds...");
+            yield return new WaitForSeconds(2f);
+            isSpeaking = false;
+            yield return StartCoroutine(SpeakText(text)); // Retry once
+            yield break;
+        }
 
         if (request.result != UnityWebRequest.Result.Success)
         {
             Debug.LogError("TTS Error: " + request.error);
+            isSpeaking = false;
             yield break;
         }
 
         string filePath = Path.Combine(Application.persistentDataPath, "response.mp3");
         File.WriteAllBytes(filePath, request.downloadHandler.data);
 
-        StartCoroutine(PlayAudio(filePath));
+        yield return StartCoroutine(PlayAudio(filePath));
+        isSpeaking = false; // Reset after playback ends
     }
 
     private IEnumerator PlayAudio(string path)
@@ -64,5 +84,7 @@ public class OpenAITTS : MonoBehaviour
         AudioClip clip = DownloadHandlerAudioClip.GetContent(www);
         audioSource.clip = clip;
         audioSource.Play();
+
+        yield return new WaitForSeconds(clip.length + 0.3f); // Wait until finished before allowing next TTS
     }
 }

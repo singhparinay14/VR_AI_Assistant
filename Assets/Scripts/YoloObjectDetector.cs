@@ -6,18 +6,23 @@ using System.Linq;
 
 public struct DetectionInfo
 {
-    public string label;   // COCO class name
-    public Rect bbox;    // pixel rect in the resized 416x416 image
-    public string colour;  // coarse colour word
+    public string label;
+    public Rect bbox;
+    public string colour;
+    public Vector3 worldPos;
+    public float distance;
+    public string relDir;
+    public string surface;
 }
 
 public class YoloObjectDetector : MonoBehaviour
 {
-    public event Action<List<DetectionInfo>> OnDetections;   // subscribers get the list each frame
+    public event Action<List<DetectionInfo>> OnDetections;
 
     [Header("Model & Vision")]
     public ModelAsset modelAsset;
     public RenderTexture visionTexture;
+    public Camera visionCamera;
     [Range(0f, 1f)]
     public float confidenceThreshold = 0.5f;
 
@@ -28,10 +33,8 @@ public class YoloObjectDetector : MonoBehaviour
     public int inputWidth = 416;
     public int inputHeight = 416;
 
-    // reusable readable texture for colour sampling
     private Texture2D readTex;
 
-    // COCO labels (80 classes)
     private readonly string[] cocoLabels =
     {
         "person","bicycle","car","motorbike","aeroplane","bus","train","truck","boat","traffic light",
@@ -56,7 +59,6 @@ public class YoloObjectDetector : MonoBehaviour
 
         model = ModelLoader.Load(modelAsset);
         worker = new Worker(model, BackendType.GPUCompute);
-
         readTex = new Texture2D(inputWidth, inputHeight, TextureFormat.RGB24, false);
 
         Debug.Log("YoloObjectDetector initialised.");
@@ -75,49 +77,29 @@ public class YoloObjectDetector : MonoBehaviour
             return;
         }
 
-        // ---------- build input tensor ----------
         var transform = new TextureTransform().SetDimensions(inputWidth, inputHeight, 3);
         var inputShape = new TensorShape(1, 3, inputHeight, inputWidth);
         using Tensor<float> input = new Tensor<float>(inputShape);
 
         TextureConverter.ToTensor(visionTexture, input, transform);
-
-        // ---------- run network ----------
         worker.Schedule(input);
 
-        using Tensor<float> cpuOut =
-            worker.PeekOutput().ReadbackAndClone() as Tensor<float>;
+        using Tensor<float> cpuOut = worker.PeekOutput().ReadbackAndClone() as Tensor<float>;
 
-        // ---------- make a CPU copy of the frame for colour sampling ----------
         RenderTexture.active = visionTexture;
         readTex.ReadPixels(new Rect(0, 0, inputWidth, inputHeight), 0, 0);
         readTex.Apply();
         RenderTexture.active = null;
 
-        // ---------- parse detections ----------
         var detections = ParseDetections(cpuOut, readTex);
-
-        // broadcast to anyone listening (for chat context)
         OnDetections?.Invoke(detections);
 
-        // simple log for debugging
-        if (detections.Count > 0)
+        foreach (var d in detections)
         {
-            Debug.Log("Objects detected: " +
-                      string.Join(", ", detections.Select(d => d.colour + " " + d.label).Distinct()));
-            foreach (var d in detections)
-            {
-                Debug.Log($"DETECT {d.label} -> {d.colour}");
-
-            }
+            Debug.Log($"{d.colour} {d.label}: {d.relDir}, {d.distance:F1}m, on {d.surface} at {d.worldPos}");
+            Debug.DrawRay(visionCamera.transform.position, d.worldPos - visionCamera.transform.position, Color.red, 0.5f);
         }
-        else
-            Debug.Log("No objects detected in this frame.");
     }
-
-    // =========================================================================================
-    // Helpers
-    // =========================================================================================
 
     List<DetectionInfo> ParseDetections(Tensor<float> t, Texture2D srcTex)
     {
@@ -128,7 +110,6 @@ public class YoloObjectDetector : MonoBehaviour
 
         for (int b = 0; b < boxes; b++)
         {
-            // ----- class selection -----
             int bestClass = 0;
             float bestScore = 0f;
 
@@ -142,29 +123,43 @@ public class YoloObjectDetector : MonoBehaviour
                 }
             }
 
-            if (bestScore < confidenceThreshold)
-                continue;
+            if (bestScore < confidenceThreshold) continue;
 
-            // ----- bbox (x,y,w,h) normalised -----
             float x = attrsFirst ? t[0, 0, b] : t[0, b, 0];
             float y = attrsFirst ? t[0, 1, b] : t[0, b, 1];
             float w = attrsFirst ? t[0, 2, b] : t[0, b, 2];
             float h = attrsFirst ? t[0, 3, b] : t[0, b, 3];
 
-            var rect = new Rect(
-                (x - w * 0.5f) * inputWidth,
-                (y - h * 0.5f) * inputHeight,
-                w * inputWidth,
-                h * inputHeight);
-
-            // ----- colour sampling -----
+            var rect = new Rect((x - w * 0.5f) * inputWidth, (y - h * 0.5f) * inputHeight, w * inputWidth, h * inputHeight);
             string colWord = SampleColour(srcTex, rect);
+
+            float vx = (rect.x + rect.width * 0.5f) / inputWidth;
+            float vy = 1f - ((rect.y + rect.height * 0.5f) / inputHeight); // FIX: Unity viewport Y is bottom-up
+
+            Ray ray = visionCamera.ViewportPointToRay(new Vector3(vx, vy, 0f));
+            Vector3 worldPos = Vector3.zero;
+            float dist = 0f;
+            string surf = "unknown";
+
+            if (Physics.Raycast(ray, out RaycastHit hit, Mathf.Infinity))
+            {
+                worldPos = hit.point;
+                dist = Vector3.Distance(Camera.main.transform.position, hit.point);
+                surf = string.IsNullOrEmpty(hit.collider.tag) ? hit.collider.name : hit.collider.tag;
+            }
+
+            Vector3 local = Camera.main.transform.InverseTransformPoint(worldPos);
+            string dir = Mathf.Abs(local.x) < 0.3f ? "center" : (local.x < 0f ? "left" : "right");
 
             list.Add(new DetectionInfo
             {
                 label = cocoLabels[bestClass],
                 bbox = rect,
-                colour = colWord
+                colour = colWord,
+                worldPos = worldPos,
+                distance = dist,
+                surface = surf,
+                relDir = dir
             });
         }
         return list;
@@ -178,30 +173,29 @@ public class YoloObjectDetector : MonoBehaviour
         int y1 = Mathf.Clamp(Mathf.RoundToInt(r.y + r.height), 0, tex.height - 1);
 
         bool linear = QualitySettings.activeColorSpace == ColorSpace.Linear;
-
-        // best pixel seen so far
         float bestS = 0f, bestH = 0f, bestV = 0f;
 
-        for (int y = y0; y <= y1; y += 2)           // step 2 px for speed
+        for (int y = y0; y <= y1; y += 2)
+        {
             for (int x = x0; x <= x1; x += 2)
             {
                 Color c = tex.GetPixel(x, y);
-                if (linear) c = c.gamma;                // convert to sRGB
+                if (linear) c = c.gamma;
 
                 Color.RGBToHSV(c, out float h, out float s, out float v);
 
-                if (s > bestS && v > 0.15f)             // ignore very dark pixels
+                if (s > bestS && v > 0.15f)
                 {
                     bestS = s;
                     bestH = h;
                     bestV = v;
                 }
             }
+        }
 
-        if (bestS < 0.18f) return "gray";           // not enough saturation
+        if (bestS < 0.18f) return "gray";
         if (bestV > 0.90f && bestS < 0.20f) return "white";
         if (bestV < 0.12f) return "black";
-
         if (bestH < 15f || bestH >= 345f) return "red";
         if (bestH < 45f) return "orange";
         if (bestH < 70f) return "yellow";
@@ -211,8 +205,6 @@ public class YoloObjectDetector : MonoBehaviour
         if (bestH < 295f) return "purple";
         return "pink";
     }
-
-
 
     void OnDestroy()
     {
