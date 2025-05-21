@@ -4,7 +4,7 @@ using System.Linq;
 
 public class VisionContextProvider : MonoBehaviour
 {
-    public YoloObjectDetector detector;   // assign in Inspector
+    public YoloObjectDetector detector;   
 
     string currentContext = "nothing";
 

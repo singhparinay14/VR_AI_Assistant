@@ -27,17 +27,15 @@ public class OpenAIResponse
 public class ChatGPTManager : MonoBehaviour
 {
     [Header("Vision Link")]
-    [SerializeField] private YoloObjectDetector detector; // drag in Inspector
+    [SerializeField] private YoloObjectDetector detector; 
 
-    private string visionContext = "nothing";             // updated each frame
+    private string visionContext = "nothing";             
 
     private string openAI_APIKey;
     private readonly string openAI_Endpoint =
         "https://api.openai.com/v1/chat/completions";
 
-    // ---------------------------------------------------------------------- //
-    // Unity lifecycle
-    // ---------------------------------------------------------------------- //
+    
 
     private void Awake()
     {
@@ -68,7 +66,7 @@ public class ChatGPTManager : MonoBehaviour
             return;
         }
 
-        // e.g. "a blue mug, a white chair"
+        
         visionContext = string.Join(", ",
             list.Select(d => $"a {d.colour} {d.label}"));
     }

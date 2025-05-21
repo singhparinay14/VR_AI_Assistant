@@ -9,7 +9,7 @@ public class OpenAITTS : MonoBehaviour
 {
     private string openAI_APIKey;
     public AudioSource audioSource;
-    private bool isSpeaking = false; // Added: prevent overlapping calls
+    private bool isSpeaking = false; //prevent overlapping calls
 
     private void Awake()
     {
