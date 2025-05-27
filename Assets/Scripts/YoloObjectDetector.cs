@@ -3,6 +3,7 @@ using Unity.Sentis;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+//using System.Diagnostics;
 
 public struct DetectionInfo
 {
@@ -94,12 +95,29 @@ public class YoloObjectDetector : MonoBehaviour
         var detections = ParseDetections(cpuOut, readTex);
         OnDetections?.Invoke(detections);
 
-        foreach (var d in detections)
+        // 🧠 Group and summarize detections
+        if (detections.Count == 0)
         {
-            Debug.Log($"{d.colour} {d.label}: {d.relDir}, {d.distance:F1}m, on {d.surface} at {d.worldPos}");
-            Debug.DrawRay(visionCamera.transform.position, d.worldPos - visionCamera.transform.position, Color.red, 0.5f);
+            Debug.Log("No detections.");
+            return;
         }
+
+        var grouped = detections
+            .GroupBy(d => $"{d.colour}_{d.label}_{d.relDir}")
+            .Select(g =>
+            {
+                var d = g.First(); // sample
+                return $"{g.Count()}x {d.colour} {d.label} - {d.relDir}, {d.distance:F1}m, on {d.surface} at {d.worldPos:F2}";
+            });
+
+        string summary = "Detections:\n" + string.Join("\n", grouped);
+        Debug.Log(summary);
+
+        // 🧪 Optional: visualize rays
+        foreach (var d in detections)
+            UnityEngine.Debug.DrawRay(visionCamera.transform.position, d.worldPos - visionCamera.transform.position, Color.red, 0.5f);
     }
+
 
     List<DetectionInfo> ParseDetections(Tensor<float> t, Texture2D srcTex)
     {

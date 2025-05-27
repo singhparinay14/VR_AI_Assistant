@@ -4,6 +4,7 @@ using System.Linq;                  // for string.Join + Select
 using UnityEngine;
 using UnityEngine.Networking;
 using Newtonsoft.Json;
+//using System.Diagnostics;
 
 [System.Serializable]
 public class Message
@@ -27,7 +28,9 @@ public class OpenAIResponse
 public class ChatGPTManager : MonoBehaviour
 {
     [Header("Vision Link")]
-    [SerializeField] private YoloObjectDetector detector; 
+    [SerializeField] private YoloObjectDetector detector;
+    [SerializeField] private BotNavigator botNavigator;
+    [SerializeField] private PathDrawer pathDrawer;
 
     private string visionContext = "nothing";             
 
@@ -66,9 +69,11 @@ public class ChatGPTManager : MonoBehaviour
             return;
         }
 
-        
-        visionContext = string.Join(", ",
-            list.Select(d => $"a {d.colour} {d.label}"));
+        var grouped = list
+            .GroupBy(d => $"{d.colour} {d.label}")
+            .Select(g => $"{g.Count()} {g.Key}");
+
+        visionContext = string.Join(", ", grouped);
     }
 
     // ---------------------------------------------------------------------- //
@@ -110,7 +115,7 @@ public class ChatGPTManager : MonoBehaviour
 
         if (request.result != UnityWebRequest.Result.Success)
         {
-            Debug.LogError("OpenAI error: " + request.error);
+            UnityEngine.Debug.LogError("OpenAI error: " + request.error);
             callback("Sorry, something went wrong.");
         }
         else
@@ -119,7 +124,40 @@ public class ChatGPTManager : MonoBehaviour
             var response =
                 JsonConvert.DeserializeObject<OpenAIResponse>(responseJson);
             string aiResponse = response.choices[0].message.content.Trim();
+
+            TryHandleNavigation(aiResponse);
+
             callback(aiResponse);
+        }
+    }
+
+    private void TryHandleNavigation(string aiResponse)
+    {
+        // Simple keyword-based trigger
+        if (aiResponse.ToLower().Contains("guide you to") ||
+            aiResponse.ToLower().Contains("take you to"))
+        {
+            // Attempt to extract object name
+            string[] knownObjects = { "shelby_car", "human_male"};
+
+            foreach (string obj in knownObjects)
+            {
+                if (aiResponse.ToLower().Contains(obj.ToLower()))
+                {
+                    GameObject target = GameObject.Find(obj.Replace(" ", ""));
+                    if (target != null && botNavigator != null)
+                    {
+                        botNavigator.MoveToTarget(target.transform.position);
+                        pathDrawer.DrawPathTo(target.transform.position);
+                        UnityEngine.Debug.Log($"Navigating to {obj}");
+                    }
+                    else
+                    {
+                        UnityEngine.Debug.LogWarning("Target or navigator not found.");
+                    }
+                    break;
+                }
+            }
         }
     }
 }
