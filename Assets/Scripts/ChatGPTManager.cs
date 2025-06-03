@@ -1,10 +1,11 @@
+// ======================== ChatGPTManager.cs ========================
+
 using System.Collections;
 using System.Collections.Generic;
-using System.Linq;                  // for string.Join + Select
+using System.Linq;
 using UnityEngine;
 using UnityEngine.Networking;
 using Newtonsoft.Json;
-//using System.Diagnostics;
 
 [System.Serializable]
 public class Message
@@ -32,13 +33,11 @@ public class ChatGPTManager : MonoBehaviour
     [SerializeField] private BotNavigator botNavigator;
     [SerializeField] private PathDrawer pathDrawer;
 
-    private string visionContext = "nothing";             
+    private string visionContext = "nothing";
 
     private string openAI_APIKey;
     private readonly string openAI_Endpoint =
         "https://api.openai.com/v1/chat/completions";
-
-    
 
     private void Awake()
     {
@@ -57,10 +56,6 @@ public class ChatGPTManager : MonoBehaviour
             detector.OnDetections -= HandleDetections;
     }
 
-    // ---------------------------------------------------------------------- //
-    // Vision callback
-    // ---------------------------------------------------------------------- //
-
     private void HandleDetections(List<DetectionInfo> list)
     {
         if (list == null || list.Count == 0)
@@ -75,10 +70,6 @@ public class ChatGPTManager : MonoBehaviour
 
         visionContext = string.Join(", ", grouped);
     }
-
-    // ---------------------------------------------------------------------- //
-    // OpenAI request
-    // ---------------------------------------------------------------------- //
 
     public IEnumerator SendMessageToOpenAI(
         string userMessage, System.Action<string> callback)
@@ -125,39 +116,61 @@ public class ChatGPTManager : MonoBehaviour
                 JsonConvert.DeserializeObject<OpenAIResponse>(responseJson);
             string aiResponse = response.choices[0].message.content.Trim();
 
-            TryHandleNavigation(aiResponse);
+            TryHandleNavigation(userMessage);
 
             callback(aiResponse);
         }
     }
 
-    private void TryHandleNavigation(string aiResponse)
+    private void TryHandleNavigation(string userMessage)
     {
-        // Simple keyword-based trigger
-        if (aiResponse.ToLower().Contains("guide you to") ||
-            aiResponse.ToLower().Contains("take you to"))
-        {
-            // Attempt to extract object name
-            string[] knownObjects = { "shelby_car", "human_male"};
+        string msg = userMessage.ToLower();
 
-            foreach (string obj in knownObjects)
-            {
-                if (aiResponse.ToLower().Contains(obj.ToLower()))
-                {
-                    GameObject target = GameObject.Find(obj.Replace(" ", ""));
-                    if (target != null && botNavigator != null)
-                    {
-                        botNavigator.MoveToTarget(target.transform.position);
-                        pathDrawer.DrawPathTo(target.transform.position);
-                        UnityEngine.Debug.Log($"Navigating to {obj}");
-                    }
-                    else
-                    {
-                        UnityEngine.Debug.LogWarning("Target or navigator not found.");
-                    }
-                    break;
-                }
-            }
+        if (!msg.Contains("guide me to") && !msg.Contains("take me to")) return;
+
+        string[] words = msg.Split(' ');
+        string targetLabel = "";
+        string targetColor = "";
+
+        foreach (var word in words)
+        {
+            if (IsColor(word)) targetColor = word;
+            else if (detector.IsCocoLabel(word)) targetLabel = word;
         }
+
+        if (string.IsNullOrEmpty(targetLabel))
+        {
+            Debug.LogWarning("Navigation: No known object label in message.");
+            return;
+        }
+
+        var detections = detector.GetLatestDetections();
+        var bestMatch = detections
+            .Where(d => d.label == targetLabel && d.colour == targetColor)
+            .OrderBy(d => d.distance)
+            .FirstOrDefault();
+
+        if (!string.IsNullOrEmpty(bestMatch.label))
+        {
+            botNavigator?.MoveToTarget(bestMatch.worldPos);
+            pathDrawer?.DrawPathTo(bestMatch.worldPos);
+            Debug.Log($"Navigating to {targetColor} {targetLabel} at {bestMatch.worldPos}");
+        }
+        else
+        {
+            Debug.LogWarning($"No matching {targetColor} {targetLabel} found.");
+        }
+    }
+
+    public bool HasContextReady()
+    {
+        return !string.IsNullOrEmpty(visionContext) && visionContext != "nothing";
+    }
+
+
+    bool IsColor(string word)
+    {
+        string[] colors = { "red", "gray", "blue", "green", "yellow", "white", "black", "orange", "purple", "pink" };
+        return colors.Contains(word);
     }
 }

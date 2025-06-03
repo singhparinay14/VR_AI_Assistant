@@ -23,17 +23,23 @@ public class PathDrawer : MonoBehaviour
             return;
         }
 
-        if (NavMesh.CalculatePath(startPoint.position, targetPosition, NavMesh.AllAreas, navPath))
+        NavMeshPath path = new NavMeshPath();
+        if (NavMesh.CalculatePath(startPoint.position, targetPosition, NavMesh.AllAreas, path))
         {
-            lineRenderer.positionCount = navPath.corners.Length;
-            lineRenderer.SetPositions(navPath.corners);
+            lineRenderer.positionCount = path.corners.Length;
+            lineRenderer.SetPositions(path.corners);
+            Debug.Log("PathDrawer: Drawing path with " + path.corners.Length + " corners.");
         }
         else
         {
             Debug.LogWarning("PathDrawer: Could not calculate path.");
             lineRenderer.positionCount = 0;
         }
+
+        // Debug line (optional)
+        Debug.DrawLine(startPoint.position, targetPosition, Color.red, 5f);
     }
+
 
     public void ClearPath()
     {

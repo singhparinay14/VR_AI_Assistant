@@ -10,6 +10,8 @@ public class VoiceInteractionManager : MonoBehaviour
     public ChatGPTManager chatGPTManager;
     public OpenAITTS openAITTS;
     public BotAI botAI;
+    public KeyCode micToggleKey = KeyCode.Keypad0;
+
 
     [Header("UI (Optional)")]
     public Button recordButton;
@@ -27,7 +29,7 @@ public class VoiceInteractionManager : MonoBehaviour
 
     void Update()
     {
-        if (Input.GetKeyDown(KeyCode.R))
+        if (Input.GetKeyDown(micToggleKey))
         {
             if (!isRecording)
                 StartVoiceRecording();
@@ -35,6 +37,7 @@ public class VoiceInteractionManager : MonoBehaviour
                 StopAndProcessRecording();
         }
     }
+
 
     public void OnRecordButtonPressed()
     {
@@ -78,21 +81,28 @@ public class VoiceInteractionManager : MonoBehaviour
 
     private IEnumerator ProcessVoiceInput()
     {
-        // Step 1: Transcribe with Whisper
         yield return whisperTranscriber.TranscribeAudio(voiceRecorder.recordedFilePath, (string transcription) =>
         {
             Debug.Log("Transcription: " + transcription);
-            botAI.DisplayUserMessage(transcription); // optional
+            botAI.DisplayUserMessage(transcription);
 
-            // Step 2: Send to GPT
-            StartCoroutine(chatGPTManager.SendMessageToOpenAI(transcription, (string gptReply) =>
+            if (!string.IsNullOrWhiteSpace(transcription))
             {
-                Debug.Log("GPT says: " + gptReply);
-                botAI.DisplayAIMessage(gptReply); // update chat box
+                StartCoroutine(DelayedSend(transcription));
+            }
+        });
+    }
 
-                // Step 3: Send to TTS and speak
-                StartCoroutine(openAITTS.SpeakText(gptReply));
-            }));
+    private IEnumerator DelayedSend(string message)
+    {
+        yield return new WaitUntil(() => chatGPTManager.HasContextReady());
+        yield return new WaitForSeconds(0.2f);
+
+        yield return chatGPTManager.SendMessageToOpenAI(message, (string gptReply) =>
+        {
+            Debug.Log("GPT says: " + gptReply);
+            botAI.DisplayAIMessage(gptReply);
+            StartCoroutine(openAITTS.SpeakText(gptReply));
         });
     }
 }
