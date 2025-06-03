@@ -1,5 +1,3 @@
-// ======================== ChatGPTManager.cs ========================
-
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
@@ -29,15 +27,14 @@ public class OpenAIResponse
 public class ChatGPTManager : MonoBehaviour
 {
     [Header("Vision Link")]
-    [SerializeField] private YoloObjectDetector detector;
+    [SerializeField] private List<YoloObjectDetector> detectors;
     [SerializeField] private BotNavigator botNavigator;
     [SerializeField] private PathDrawer pathDrawer;
 
     private string visionContext = "nothing";
-
     private string openAI_APIKey;
-    private readonly string openAI_Endpoint =
-        "https://api.openai.com/v1/chat/completions";
+
+    private readonly string openAI_Endpoint = "https://api.openai.com/v1/chat/completions";
 
     private void Awake()
     {
@@ -46,14 +43,20 @@ public class ChatGPTManager : MonoBehaviour
 
     private void OnEnable()
     {
-        if (detector != null)
-            detector.OnDetections += HandleDetections;
+        foreach (var detector in detectors)
+        {
+            if (detector != null)
+                detector.OnDetections += HandleDetections;
+        }
     }
 
     private void OnDisable()
     {
-        if (detector != null)
-            detector.OnDetections -= HandleDetections;
+        foreach (var detector in detectors)
+        {
+            if (detector != null)
+                detector.OnDetections -= HandleDetections;
+        }
     }
 
     private void HandleDetections(List<DetectionInfo> list)
@@ -71,8 +74,7 @@ public class ChatGPTManager : MonoBehaviour
         visionContext = string.Join(", ", grouped);
     }
 
-    public IEnumerator SendMessageToOpenAI(
-        string userMessage, System.Action<string> callback)
+    public IEnumerator SendMessageToOpenAI(string userMessage, System.Action<string> callback)
     {
         var requestData = new
         {
@@ -95,8 +97,7 @@ public class ChatGPTManager : MonoBehaviour
         string jsonData = JsonConvert.SerializeObject(requestData);
         byte[] jsonToSend = System.Text.Encoding.UTF8.GetBytes(jsonData);
 
-        using UnityWebRequest request =
-            new UnityWebRequest(openAI_Endpoint, "POST");
+        using UnityWebRequest request = new UnityWebRequest(openAI_Endpoint, "POST");
         request.uploadHandler = new UploadHandlerRaw(jsonToSend);
         request.downloadHandler = new DownloadHandlerBuffer();
         request.SetRequestHeader("Content-Type", "application/json");
@@ -112,10 +113,10 @@ public class ChatGPTManager : MonoBehaviour
         else
         {
             string responseJson = request.downloadHandler.text;
-            var response =
-                JsonConvert.DeserializeObject<OpenAIResponse>(responseJson);
+            var response = JsonConvert.DeserializeObject<OpenAIResponse>(responseJson);
             string aiResponse = response.choices[0].message.content.Trim();
 
+            UnityEngine.Debug.Log("GPT says: " + aiResponse);
             TryHandleNavigation(userMessage);
 
             callback(aiResponse);
@@ -126,27 +127,62 @@ public class ChatGPTManager : MonoBehaviour
     {
         string msg = userMessage.ToLower();
 
-        if (!msg.Contains("guide me to") && !msg.Contains("take me to")) return;
+        if (!msg.Contains("guide me to") && !msg.Contains("take me to"))
+            return;
+
+        UnityEngine.Debug.Log("[TryHandleNavigation] Attempting to guide to red car");
 
         string[] words = msg.Split(' ');
         string targetLabel = "";
         string targetColor = "";
 
-        foreach (var word in words)
+        foreach (string word in words)
         {
-            if (IsColor(word)) targetColor = word;
-            else if (detector.IsCocoLabel(word)) targetLabel = word;
+            if (IsColor(word))
+            {
+                targetColor = word.ToLower();
+            }
+            else
+            {
+                foreach (var d in detectors)
+                {
+                    if (d.IsCocoLabel(word))
+                    {
+                        targetLabel = word.ToLower();
+                    }
+                }
+            }
         }
 
         if (string.IsNullOrEmpty(targetLabel))
         {
-            Debug.LogWarning("Navigation: No known object label in message.");
+            UnityEngine.Debug.LogWarning("Navigation: No known object label in message.");
             return;
         }
 
-        var detections = detector.GetLatestDetections();
-        var bestMatch = detections
-            .Where(d => d.label == targetLabel && d.colour == targetColor)
+        // Aggregate detections from all detectors
+        var allDetections = new List<DetectionInfo>();
+        foreach (var d in detectors)
+        {
+            allDetections.AddRange(d.GetLatestDetections());
+        }
+
+        // Optional: log all detected objects
+        foreach (var det in allDetections)
+        {
+            UnityEngine.Debug.Log($"Detected: {det.label}, Color: {det.colour}, Pos: {det.worldPos}, Distance: {det.distance}");
+        }
+
+        // Filter based on label and optional color
+        var filtered = allDetections
+            .Where(d => d.label.ToLower() == targetLabel);
+
+        if (!string.IsNullOrEmpty(targetColor))
+        {
+            filtered = filtered.Where(d => d.colour.ToLower() == targetColor);
+        }
+
+        var bestMatch = filtered
             .OrderBy(d => d.distance)
             .FirstOrDefault();
 
@@ -154,11 +190,11 @@ public class ChatGPTManager : MonoBehaviour
         {
             botNavigator?.MoveToTarget(bestMatch.worldPos);
             pathDrawer?.DrawPathTo(bestMatch.worldPos);
-            Debug.Log($"Navigating to {targetColor} {targetLabel} at {bestMatch.worldPos}");
+            UnityEngine.Debug.Log($"Navigating to {targetColor} {targetLabel} at {bestMatch.worldPos}");
         }
         else
         {
-            Debug.LogWarning($"No matching {targetColor} {targetLabel} found.");
+            UnityEngine.Debug.LogWarning($"No matching {targetColor} {targetLabel} found.");
         }
     }
 
@@ -167,10 +203,9 @@ public class ChatGPTManager : MonoBehaviour
         return !string.IsNullOrEmpty(visionContext) && visionContext != "nothing";
     }
 
-
-    bool IsColor(string word)
+    private bool IsColor(string word)
     {
         string[] colors = { "red", "gray", "blue", "green", "yellow", "white", "black", "orange", "purple", "pink" };
-        return colors.Contains(word);
+        return colors.Contains(word.ToLower());
     }
 }

@@ -84,6 +84,9 @@ public class YoloObjectDetector : MonoBehaviour
 
     void RunDetection()
     {
+
+        visionCamera.Render(); // Force update of RenderTexture
+
         if (visionTexture == null)
         {
             Debug.LogWarning("Vision texture is not set.");
