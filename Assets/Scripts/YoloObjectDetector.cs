@@ -226,7 +226,8 @@ public class YoloObjectDetector : MonoBehaviour
             string surf;
 
             // Perform a physics raycast; skip if it misses
-            if (Physics.Raycast(ray, out RaycastHit hit, Mathf.Infinity))
+            int mask = ~LayerMask.GetMask("Bot"); // exclude Bot layer
+            if (Physics.Raycast(ray, out RaycastHit hit, Mathf.Infinity, mask))
             {
                 worldPos = hit.point;
                 dist = Vector3.Distance(visionCamera.transform.position, hit.point);
