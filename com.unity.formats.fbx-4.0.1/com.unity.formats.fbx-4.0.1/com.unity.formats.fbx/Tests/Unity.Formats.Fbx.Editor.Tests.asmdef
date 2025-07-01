@@ -1,0 +1,24 @@
+{
+    "name": "Unity.Formats.Fbx.Editor.Tests",
+    "references": [
+        "Unity.Timeline",
+        "Autodesk.Fbx",
+        "Unity.Formats.Fbx.Editor",
+        "Unity.Formats.Fbx.Runtime",
+        "Unity.Formats.Fbx.Editor.Tests.Prefabs"
+    ],
+    "optionalUnityReferences": [
+        "TestAssemblies"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "!UNITY_EDITOR_LINUX"
+    ]
+}
