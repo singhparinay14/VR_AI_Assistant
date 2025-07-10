@@ -32,23 +32,24 @@ public class YoloObjectDetector : MonoBehaviour
     private Model model;
 
     [Header("Input Dimensions")]
-    public int inputWidth = 416;
-    public int inputHeight = 416;
+    public int inputWidth = 640;
+    public int inputHeight = 640;
 
     private Texture2D readTex;
 
-    private readonly string[] cocoLabels =
-    {
-        "person","bicycle","car","motorbike","aeroplane","bus","train","truck","boat","traffic light",
-        "fire hydrant","stop sign","parking meter","bench","bird","cat","dog","horse","sheep","cow",
-        "elephant","bear","zebra","giraffe","backpack","umbrella","handbag","tie","suitcase","frisbee",
-        "skis","snowboard","sports ball","kite","baseball bat","baseball glove","skateboard","surfboard",
-        "tennis racket","bottle","wine glass","cup","fork","knife","spoon","bowl","banana","apple",
-        "sandwich","orange","broccoli","carrot","hot dog","pizza","donut","cake","chair","sofa",
-        "pottedplant","bed","diningtable","toilet","tvmonitor","laptop","mouse","remote","keyboard",
-        "cell phone","microwave","oven","toaster","sink","refrigerator","book","clock","vase","scissors",
-        "teddy bear","hair drier","toothbrush"
-    };
+    private readonly string[] carLabels = {
+    "Ford Mustang GT Convertible 2020",
+    "Audi R8 2014",
+    "Audi RS6 Avant 2020",
+    "BMW X5 2015",
+    "Ferrari F8 Tributo 2020",
+    "Ferrari F40",
+    "Lamborghini Gallardo 2010",
+    "Mercedes AMG GT 2015",
+    "Porsche 911 2020",
+    "Tesla Cybertruck 2020"
+        };
+
 
     void Start()
     {
@@ -64,6 +65,8 @@ public class YoloObjectDetector : MonoBehaviour
         readTex = new Texture2D(inputWidth, inputHeight, TextureFormat.RGB24, false);
 
         Debug.Log("YoloObjectDetector initialised.");
+        Debug.Log($"Model input shape: {model.inputs[0].shape}");
+
     }
 
     void Update()
@@ -78,8 +81,9 @@ public class YoloObjectDetector : MonoBehaviour
 
     public bool IsCocoLabel(string word)
     {
-        return cocoLabels.Contains(word);
+        return carLabels.Contains(word);
     }
+
 
 
     void RunDetection()
@@ -149,8 +153,8 @@ public class YoloObjectDetector : MonoBehaviour
     {
         var list = new List<DetectionInfo>();
 
-        bool attrsFirst = t.shape[1] == 84;
-        int boxes = attrsFirst ? t.shape[2] : t.shape[1];
+        bool attrsFirst = true;
+        int boxes = 8400; // or t.shape[2] if more dynamic
 
         for (int b = 0; b < boxes; b++)
         {
@@ -158,7 +162,7 @@ public class YoloObjectDetector : MonoBehaviour
             float bestScore = 0f;
 
             // Find the highest-scoring class for this box
-            for (int c = 0; c < 80; c++)
+            for (int c = 0; c < carLabels.Length; c++)
             {
                 float score = attrsFirst ? t[0, 4 + c, b] : t[0, b, 4 + c];
                 if (score > bestScore)
@@ -208,9 +212,10 @@ public class YoloObjectDetector : MonoBehaviour
             if (vx < 0f || vx > 1f || vy < 0f || vy > 1f)
             {
                 Debug.LogWarning(
-                    $"YoloObjectDetector: Detection center out of viewport. " +
-                    $"Label='{cocoLabels[bestClass]}', raw vx={vx:F2}, vy={vy:F2}."
-                );
+                $"YoloObjectDetector: Raycast missed for Label='{(bestClass >= 0 && bestClass < carLabels.Length ? carLabels[bestClass] : $"unknown_{bestClass}")}' at viewport ({vx:F2},{vy:F2})."
+                    );
+
+
                 continue;
             }
 
@@ -239,7 +244,7 @@ public class YoloObjectDetector : MonoBehaviour
             {
                 // Skip this detection entirely if no collider was hit
                 Debug.LogWarning(
-                    $"YoloObjectDetector: Raycast missed for Label='{cocoLabels[bestClass]}' at viewport ({vx:F2},{vy:F2})."
+                    $"YoloObjectDetector: Raycast missed for Label='{(bestClass >= 0 && bestClass < carLabels.Length ? carLabels[bestClass] : $"unknown_{bestClass}")}'..."
                 );
                 continue;
             }
@@ -253,7 +258,7 @@ public class YoloObjectDetector : MonoBehaviour
             // Add this detection to the list
             list.Add(new DetectionInfo
             {
-                label = cocoLabels[bestClass],
+                label = (bestClass >= 0 && bestClass < carLabels.Length)? carLabels[bestClass]: $"unknown_class_{bestClass}",
                 bbox = rect,
                 colour = colWord,
                 worldPos = worldPos,
