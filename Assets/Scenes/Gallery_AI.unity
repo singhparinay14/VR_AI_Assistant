@@ -452,7 +452,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!114 &38541421
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -6739,7 +6739,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 339441fe5d968f944a629ebeef8e2897, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  modelAsset: {fileID: 5022602860645237092, guid: a97d672be647e1341a01b9cb19a74ca5, type: 3}
+  modelAsset: {fileID: 5022602860645237092, guid: ae33cd39dd280274caca16fb81e7a268, type: 3}
   visionTexture: {fileID: 8400000, guid: b6fe1073b65cdc341b40bb123281d0e1, type: 2}
   visionCamera: {fileID: 935729595}
   confidenceThreshold: 0.253
@@ -8660,7 +8660,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 339441fe5d968f944a629ebeef8e2897, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  modelAsset: {fileID: 5022602860645237092, guid: a97d672be647e1341a01b9cb19a74ca5, type: 3}
+  modelAsset: {fileID: 5022602860645237092, guid: ae33cd39dd280274caca16fb81e7a268, type: 3}
   visionTexture: {fileID: 8400000, guid: ff2ba72d7d2b76a48abcdd5d065de200, type: 2}
   visionCamera: {fileID: 737898258}
   confidenceThreshold: 0.253
