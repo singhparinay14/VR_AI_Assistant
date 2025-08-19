@@ -4,6 +4,9 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 
+/// <summary>
+/// Holds YOLO detection info
+/// </summary>
 public struct DetectionInfo
 {
     public string label;
@@ -13,300 +16,310 @@ public struct DetectionInfo
     public float distance;
     public string relDir;
     public string surface;
+    public float confidence;
 }
 
 public class YoloObjectDetector : MonoBehaviour
 {
-    private List<DetectionInfo> latestDetections = new();
-
-    public event Action<List<DetectionInfo>> OnDetections;
-
     [Header("Model & Vision")]
     public ModelAsset modelAsset;
-    public RenderTexture visionTexture;
-    public Camera visionCamera;                  // The camera used for YOLO raycasting
-    [Range(0f, 1f)]
-    public float confidenceThreshold = 0.5f;
+    public Camera[] visionCameras;             // Multiple cameras supported
+    public int inputWidth = 640;
+    public int inputHeight = 640;
+    [Range(0f, 1f)] public float confidenceThreshold = 0.5f;
 
     private Worker worker;
     private Model model;
-
-    [Header("Input Dimensions")]
-    public int inputWidth = 416;
-    public int inputHeight = 416;
-
     private Texture2D readTex;
 
-    private readonly string[] cocoLabels =
-    {
-        "person","bicycle","car","motorbike","aeroplane","bus","train","truck","boat","traffic light",
-        "fire hydrant","stop sign","parking meter","bench","bird","cat","dog","horse","sheep","cow",
-        "elephant","bear","zebra","giraffe","backpack","umbrella","handbag","tie","suitcase","frisbee",
-        "skis","snowboard","sports ball","kite","baseball bat","baseball glove","skateboard","surfboard",
-        "tennis racket","bottle","wine glass","cup","fork","knife","spoon","bowl","banana","apple",
-        "sandwich","orange","broccoli","carrot","hot dog","pizza","donut","cake","chair","sofa",
-        "pottedplant","bed","diningtable","toilet","tvmonitor","laptop","mouse","remote","keyboard",
-        "cell phone","microwave","oven","toaster","sink","refrigerator","book","clock","vase","scissors",
-        "teddy bear","hair drier","toothbrush"
+    public event Action<List<DetectionInfo>> OnDetections;
+
+    // === Your fine-tuned labels ===
+    private readonly string[] carLabels = {
+        "Ford Mustang GT Convertible 2020",
+        "Audi R8 2014",
+        "Audi RS6 Avant 2020",
+        "BMW X5 2015",
+        "Ferrari F8 Tributo 2020",
+        "Ferrari F40",
+        "Lamborghini Gallardo 2010",
+        "Porsche 911 Turbo S 2021",
+        "Mercedes AMG GT 2019",
+        "Lamborghini Aventador SVJ"
     };
+
+    private List<DetectionInfo> latestDetections = new();
 
     void Start()
     {
-        if (modelAsset == null)
-        {
-            Debug.LogError("YoloObjectDetector: modelAsset not set.");
-            enabled = false;
-            return;
-        }
-
         model = ModelLoader.Load(modelAsset);
         worker = new Worker(model, BackendType.GPUCompute);
         readTex = new Texture2D(inputWidth, inputHeight, TextureFormat.RGB24, false);
 
-        Debug.Log("YoloObjectDetector initialised.");
+        Debug.Log($"YoloObjectDetector initialized with {visionCameras.Length} cameras.");
     }
 
     void Update()
     {
-        RunDetection();
+        if (visionCameras == null || visionCameras.Length == 0) return;
+
+        List<DetectionInfo> combinedDetections = new();
+
+        foreach (Camera cam in visionCameras)
+        {
+            if (cam == null) continue;
+
+            // Render camera to texture
+            RenderTexture rt = new RenderTexture(inputWidth, inputHeight, 24);
+            cam.targetTexture = rt;
+            cam.Render();
+
+            RenderTexture.active = rt;
+            readTex.ReadPixels(new Rect(0, 0, inputWidth, inputHeight), 0, 0);
+            readTex.Apply();
+            RenderTexture.active = null;
+            cam.targetTexture = null;
+            Destroy(rt);
+
+            // Convert image to tensor
+            using var input = TextureConverter.ToTensor(readTex, channels: 3);
+
+            // Run inference
+            worker.Schedule(input);
+
+            // Parse detections for this camera
+            List<DetectionInfo> detections = ParseDetections(worker, cam);
+            combinedDetections.AddRange(detections);
+        }
+
+        latestDetections = combinedDetections;
+
+        if (latestDetections.Count > 0)
+        {
+            OnDetections?.Invoke(latestDetections);
+        }
+    }
+
+    // IoU (Intersection over Union) helper
+    private float IoU(Rect a, Rect b)
+    {
+        float interX = Mathf.Max(a.xMin, b.xMin);
+        float interY = Mathf.Max(a.yMin, b.yMin);
+        float interW = Mathf.Min(a.xMax, b.xMax) - interX;
+        float interH = Mathf.Min(a.yMax, b.yMax) - interY;
+
+        if (interW <= 0 || interH <= 0) return 0f;
+
+        float intersection = interW * interH;
+        float union = a.width * a.height + b.width * b.height - intersection;
+        return intersection / union;
+    }
+
+    // Non-Maximum Suppression
+    private List<DetectionInfo> ApplyNMS(List<DetectionInfo> detections, float iouThreshold = 0.45f)
+    {
+        var results = new List<DetectionInfo>();
+
+        // Sort by confidence (highest first)
+        var sorted = detections.OrderByDescending(d => d.confidence).ToList();
+
+        while (sorted.Count > 0)
+        {
+            var best = sorted[0];
+            results.Add(best);
+            sorted.RemoveAt(0);
+
+            // Remove overlapping boxes of the same class
+            sorted = sorted.Where(d =>
+                !(d.label == best.label && IoU(d.bbox, best.bbox) > iouThreshold)
+            ).ToList();
+        }
+
+        return results;
+    }
+
+    private List<DetectionInfo> ParseDetections(Worker worker, Camera cam)
+    {
+        List<DetectionInfo> detections = new();
+
+        var output = worker.PeekOutput() as Tensor<float>;
+        if (output == null) return detections;
+
+        using var cpuOutput = output.ReadbackAndClone();
+
+        int numAttrs = cpuOutput.shape[1];   // 14
+        int numBoxes = cpuOutput.shape[2];   // 8400
+
+        for (int i = 0; i < numBoxes; i++)
+        {
+            float cx = cpuOutput[0, 0, i];
+            float cy = cpuOutput[0, 1, i];
+            float w = cpuOutput[0, 2, i];
+            float h = cpuOutput[0, 3, i];
+
+            // apply sigmoid to objectness
+            float obj = Sigmoid(cpuOutput[0, 4, i]);
+
+            // find best class
+            int bestClass = -1;
+            float bestScore = 0f;
+            for (int c = 5; c < numAttrs; c++)
+            {
+                float score = Sigmoid(cpuOutput[0, c, i]);
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    bestClass = c - 5;
+                }
+            }
+
+            // final confidence
+            float confidence = obj * bestScore;
+            confidence = Mathf.Sqrt(confidence);
+            if (confidence < confidenceThreshold) continue;
+
+            if (bestClass < 0 || bestClass >= carLabels.Length) continue;
+
+            string label = carLabels[bestClass];
+
+            // scale bbox to pixel space
+            float x = (cx - w / 2f) / inputWidth * cam.pixelWidth;
+            float y = (cy - h / 2f) / inputHeight * cam.pixelHeight;
+            float bw = w / inputWidth * cam.pixelWidth;
+            float bh = h / inputHeight * cam.pixelHeight;
+
+            Rect bbox = new Rect(x, y, bw, bh);
+
+            // raycast from bbox center
+            Vector3 screenPoint = new Vector3(x + bw / 2f, y + bh / 2f, cam.nearClipPlane + 1f);
+            Ray ray = cam.ScreenPointToRay(screenPoint);
+            if (Physics.Raycast(ray, out RaycastHit hit))
+            {
+                // Draw a debug line above car with detected color
+                var det = new DetectionInfo
+                {
+                    label = label,
+                    bbox = bbox,
+                    colour = SampleColour(bbox, cam),
+                    worldPos = hit.point,
+                    distance = hit.distance,
+                    relDir = GetRelativeDirection(cam, hit.point),
+                    surface = hit.collider.gameObject.name,
+                    confidence = confidence
+                };
+
+                detections.Add(det);
+
+                Debug.Log($"[YOLO] Detected {det.label} conf={det.confidence:F2} color={det.colour} at {det.worldPos}");
+
+                // Debug visualization
+                Vector3 debugPos = det.worldPos + Vector3.up * 2f;
+                Color debugCol = Color.gray;
+                if (ColorUtility.TryParseHtmlString(det.colour, out Color parsed))
+                    debugCol = parsed;
+
+                Debug.DrawLine(det.worldPos, debugPos, debugCol, 2f);
+            }
+        }
+
+        return ApplyNMS(detections, 0.6f);
+    }
+
+    // sigmoid helper
+    private float Sigmoid(float x)
+    {
+        return 1f / (1f + Mathf.Exp(-x));
+    }
+
+    private string SampleColour(Rect bbox, Camera cam)
+    {
+        // Clamp bbox inside texture
+        int x = Mathf.Clamp((int)bbox.x, 0, readTex.width - 1);
+        int y = Mathf.Clamp((int)bbox.y, 0, readTex.height - 1);
+        int w = Mathf.Clamp((int)bbox.width, 1, readTex.width - x);
+        int h = Mathf.Clamp((int)bbox.height, 1, readTex.height - y);
+
+        // Focus on the central/top region of the car (hood/roof area)
+        int cropX = x + w / 4;                // middle section
+        int cropW = w / 2;
+        int cropY = y + h / 4;                // ignore bottom (floor/reflections)
+        int cropH = h / 3;                    // only take ~⅓ height
+
+        Color[] pixels = readTex.GetPixels(cropX, cropY, cropW, cropH);
+        if (pixels.Length == 0) return "unknown";
+
+        float sumH = 0f, sumS = 0f, sumV = 0f;
+        int count = 0;
+
+        foreach (Color c in pixels)
+        {
+            Color.RGBToHSV(c, out float hue, out float sat, out float val);
+
+            // Filter out dull or extreme pixels (background, glass, shadows, bright reflections)
+            if (sat < 0.25f) continue;
+            if (val < 0.25f || val > 0.9f) continue;
+
+            // Optional: ignore floor/wall tones (cyan-ish / blue-ish range)
+            if (hue > 0.5f && hue < 0.65f) continue;
+
+            sumH += hue;
+            sumS += sat;
+            sumV += val;
+            count++;
+        }
+
+        if (count == 0) return "gray"; // fallback
+
+        float avgH = sumH / count;
+        float avgS = sumS / count;
+        float avgV = sumV / count;
+
+        return GetClosestColorName(avgH, avgS, avgV);
+    }
+
+
+
+    private string GetClosestColorName(float hue, float sat, float val)
+    {
+        if (val < 0.2f) return "black";
+        if (val > 0.9f && sat < 0.2f) return "white";
+        if (sat < 0.25f) return "gray";
+
+        if (hue < 0.05f || hue > 0.95f) return "red";
+        if (hue < 0.15f) return "orange";
+        if (hue < 0.25f) return "yellow";
+        if (hue < 0.45f) return "green";
+        if (hue < 0.60f) return "cyan";
+        if (hue < 0.75f) return "blue";
+        if (hue < 0.90f) return "purple";
+
+        return "gray";
+    }
+
+
+
+
+    private string GetRelativeDirection(Camera cam, Vector3 worldPos)
+    {
+        Vector3 local = cam.transform.InverseTransformPoint(worldPos);
+        if (local.x < -0.2f) return "left";
+        if (local.x > 0.2f) return "right";
+        return "center";
+    }
+
+    public bool HasLabel(string word)
+    {
+        foreach (var label in carLabels)
+        {
+            if (label.ToLower().Contains(word.ToLower()))
+                return true;
+        }
+        return false;
     }
 
     public List<DetectionInfo> GetLatestDetections()
     {
-        return latestDetections;
-    }
-
-    public bool IsCocoLabel(string word)
-    {
-        return cocoLabels.Contains(word);
-    }
-
-
-    void RunDetection()
-    {
-
-        visionCamera.Render(); // Force update of RenderTexture
-
-        if (visionTexture == null)
-        {
-            Debug.LogWarning("Vision texture is not set.");
-            return;
-        }
-
-        // Prepare input tensor
-        var transform = new TextureTransform().SetDimensions(inputWidth, inputHeight, 3);
-        var inputShape = new TensorShape(1, 3, inputHeight, inputWidth);
-        using Tensor<float> input = new Tensor<float>(inputShape);
-
-        TextureConverter.ToTensor(visionTexture, input, transform);
-        worker.Schedule(input);
-
-        using Tensor<float> cpuOut = worker.PeekOutput().ReadbackAndClone() as Tensor<float>;
-
-        // Read the rendered frame into readTex
-        RenderTexture.active = visionTexture;
-        readTex.ReadPixels(new Rect(0, 0, inputWidth, inputHeight), 0, 0);
-        readTex.Apply();
-        RenderTexture.active = null;
-
-        // Parse detections from the model output
-        var detections = ParseDetections(cpuOut, readTex);
-        latestDetections = detections;
-
-        OnDetections?.Invoke(detections);
-
-        // Group and log detections (one summary per frame)
-        if (detections.Count == 0)
-        {
-            Debug.Log("No detections.");
-            return;
-        }
-
-        var grouped = detections
-            .GroupBy(d => $"{d.colour}_{d.label}_{d.relDir}")
-            .Select(g =>
-            {
-                var d = g.First(); // sample one detection for details
-                return $"{g.Count()}x {d.colour} {d.label} - {d.relDir}, {d.distance:F1}m, on {d.surface} at {d.worldPos:F2}";
-            });
-
-        string summary = "Detections:\n" + string.Join("\n", grouped);
-        Debug.Log(summary);
-
-        // Visualize rays (green lines) from visionCamera to each worldPos
-        foreach (var d in detections)
-        {
-            Debug.DrawLine(
-                visionCamera.transform.position,
-                d.worldPos,
-                Color.green,
-                0.5f
-            );
-        }
-    }
-
-    List<DetectionInfo> ParseDetections(Tensor<float> t, Texture2D srcTex)
-    {
-        var list = new List<DetectionInfo>();
-
-        bool attrsFirst = t.shape[1] == 84;
-        int boxes = attrsFirst ? t.shape[2] : t.shape[1];
-
-        for (int b = 0; b < boxes; b++)
-        {
-            int bestClass = 0;
-            float bestScore = 0f;
-
-            // Find the highest-scoring class for this box
-            for (int c = 0; c < 80; c++)
-            {
-                float score = attrsFirst ? t[0, 4 + c, b] : t[0, b, 4 + c];
-                if (score > bestScore)
-                {
-                    bestScore = score;
-                    bestClass = c;
-                }
-            }
-
-            if (bestScore < confidenceThreshold)
-                continue;
-
-            // Extract raw x, y, w, h (YOLO output)
-            float x = attrsFirst ? t[0, 0, b] : t[0, b, 0];
-            float y = attrsFirst ? t[0, 1, b] : t[0, b, 1];
-            float w = attrsFirst ? t[0, 2, b] : t[0, b, 2];
-            float h = attrsFirst ? t[0, 3, b] : t[0, b, 3];
-
-            // If x or y exceed 1, assume they are in pixel coordinates already
-            if (x > 1f || y > 1f)
-            {
-                x = x / inputWidth;
-                y = y / inputHeight;
-            }
-
-            // Similarly adjust w and h if needed
-            if (w > 1f) w = w / inputWidth;
-            if (h > 1f) h = h / inputHeight;
-
-            // Now x, y, w, h should be in [0..1] (normalized)
-            // Compute bounding box in pixel coordinates
-            var rect = new Rect(
-                (x - w * 0.5f) * inputWidth,
-                (y - h * 0.5f) * inputHeight,
-                w * inputWidth,
-                h * inputHeight
-            );
-
-            // Sample color from the cropped region
-            string colWord = SampleColour(srcTex, rect);
-
-            // Convert bounding box center to viewport coordinates in [0..1]
-            float vx = (rect.x + rect.width * 0.5f) / inputWidth;
-            float vy = 1f - ((rect.y + rect.height * 0.5f) / inputHeight);
-
-            // If the center is outside the [0,1] viewport, skip it
-            if (vx < 0f || vx > 1f || vy < 0f || vy > 1f)
-            {
-                Debug.LogWarning(
-                    $"YoloObjectDetector: Detection center out of viewport. " +
-                    $"Label='{cocoLabels[bestClass]}', raw vx={vx:F2}, vy={vy:F2}."
-                );
-                continue;
-            }
-
-            // Clamp to [0,1] just in case
-            vx = Mathf.Clamp01(vx);
-            vy = Mathf.Clamp01(vy);
-
-            // Create a ray from visionCamera through that viewport point
-            Ray ray = visionCamera.ViewportPointToRay(new Vector3(vx, vy, 0f));
-
-            Vector3 worldPos;
-            float dist;
-            string surf;
-
-            // Perform a physics raycast; skip if it misses
-            int mask = ~LayerMask.GetMask("Bot"); // exclude Bot layer
-            if (Physics.Raycast(ray, out RaycastHit hit, Mathf.Infinity, mask))
-            {
-                worldPos = hit.point;
-                dist = Vector3.Distance(visionCamera.transform.position, hit.point);
-                surf = string.IsNullOrEmpty(hit.collider.tag)
-                    ? hit.collider.name
-                    : hit.collider.tag;
-            }
-            else
-            {
-                // Skip this detection entirely if no collider was hit
-                Debug.LogWarning(
-                    $"YoloObjectDetector: Raycast missed for Label='{cocoLabels[bestClass]}' at viewport ({vx:F2},{vy:F2})."
-                );
-                continue;
-            }
-
-            // Compute relative direction (left/center/right) based on visionCamera’s local space
-            Vector3 local = visionCamera.transform.InverseTransformPoint(worldPos);
-            string dir = Mathf.Abs(local.x) < 0.3f
-                ? "center"
-                : (local.x < 0f ? "left" : "right");
-
-            // Add this detection to the list
-            list.Add(new DetectionInfo
-            {
-                label = cocoLabels[bestClass],
-                bbox = rect,
-                colour = colWord,
-                worldPos = worldPos,
-                distance = dist,
-                surface = surf,
-                relDir = dir
-            });
-        }
-
-        return list;
-    }
-
-    string SampleColour(Texture2D tex, Rect r)
-    {
-        int x0 = Mathf.Clamp(Mathf.RoundToInt(r.x), 0, tex.width - 1);
-        int y0 = Mathf.Clamp(Mathf.RoundToInt(r.y), 0, tex.height - 1);
-        int x1 = Mathf.Clamp(Mathf.RoundToInt(r.x + r.width), 0, tex.width - 1);
-        int y1 = Mathf.Clamp(Mathf.RoundToInt(r.y + r.height), 0, tex.height - 1);
-
-        bool linear = QualitySettings.activeColorSpace == ColorSpace.Linear;
-        float bestS = 0f, bestH = 0f, bestV = 0f;
-
-        // Sample pixels inside the bounding box to determine dominant color
-        for (int y = y0; y <= y1; y += 2)
-        {
-            for (int x = x0; x <= x1; x += 2)
-            {
-                Color c = tex.GetPixel(x, y);
-                if (linear) c = c.gamma;
-
-                Color.RGBToHSV(c, out float h, out float s, out float v);
-
-                if (s > bestS && v > 0.15f)
-                {
-                    bestS = s;
-                    bestH = h;
-                    bestV = v;
-                }
-            }
-        }
-
-        // Return human-readable color names
-        if (bestS < 0.18f) return "gray";
-        if (bestV > 0.90f && bestS < 0.20f) return "white";
-        if (bestV < 0.12f) return "black";
-        if (bestH < 15f || bestH >= 345f) return "red";
-        if (bestH < 45f) return "orange";
-        if (bestH < 70f) return "yellow";
-        if (bestH < 170f) return "green";
-        if (bestH < 205f) return "cyan";
-        if (bestH < 255f) return "blue";
-        if (bestH < 295f) return "purple";
-        return "pink";
+        return latestDetections ?? new List<DetectionInfo>();
     }
 
     void OnDestroy()

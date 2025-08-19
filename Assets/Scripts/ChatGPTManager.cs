@@ -146,7 +146,7 @@ public class ChatGPTManager : MonoBehaviour
             {
                 foreach (var d in detectors)
                 {
-                    if (d.IsCocoLabel(word))
+                    if (d.HasLabel(word))
                     {
                         targetLabel = word.ToLower();
                     }
