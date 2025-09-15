@@ -28,6 +28,10 @@ public class YoloObjectDetector : MonoBehaviour
     public int inputHeight = 640;
     [Range(0f, 1f)] public float confidenceThreshold = 0.5f;
 
+    // Persistent RTs matching visionCameras (assigned/created at runtime)
+    [Tooltip("Optional: assign per-camera RTs here; otherwise they are created in Awake().")]
+    public RenderTexture[] visionRTs;
+
     private Worker worker;
     private Model model;
     private Texture2D readTex;
@@ -50,13 +54,37 @@ public class YoloObjectDetector : MonoBehaviour
 
     private List<DetectionInfo> latestDetections = new();
 
+    void Awake()
+    {
+        if (visionCameras == null) visionCameras = Array.Empty<Camera>();
+        if (visionRTs == null || visionRTs.Length != visionCameras.Length)
+            visionRTs = new RenderTexture[visionCameras.Length];
+
+        // Create/bind one persistent RT per camera and assign once
+        for (int i = 0; i < visionCameras.Length; i++)
+        {
+            var cam = visionCameras[i];
+            if (!cam) continue;
+
+            if (!visionRTs[i])
+            {
+                var rt = new RenderTexture(inputWidth, inputHeight, 24, RenderTextureFormat.ARGB32);
+                rt.name = $"VisionRT_{i}";
+                rt.Create();
+                visionRTs[i] = rt;
+            }
+
+            cam.targetTexture = visionRTs[i];   // bind permanently
+        }
+    }
+
     void Start()
     {
         model = ModelLoader.Load(modelAsset);
         worker = new Worker(model, BackendType.GPUCompute);
         readTex = new Texture2D(inputWidth, inputHeight, TextureFormat.RGB24, false);
 
-        Debug.Log($"YoloObjectDetector initialized with {visionCameras.Length} cameras.");
+        UnityEngine.Debug.Log($"YoloObjectDetector initialized with {visionCameras.Length} cameras.");
     }
 
     void Update()
@@ -65,27 +93,26 @@ public class YoloObjectDetector : MonoBehaviour
 
         List<DetectionInfo> combinedDetections = new();
 
-        foreach (Camera cam in visionCameras)
+        for (int i = 0; i < visionCameras.Length; i++)
         {
-            if (cam == null) continue;
+            Camera cam = visionCameras[i];
+            RenderTexture rt = (visionRTs != null && i < visionRTs.Length) ? visionRTs[i] : null;
+            if (!cam || !rt) continue;
 
-            // Render camera to texture
-            RenderTexture rt = new RenderTexture(inputWidth, inputHeight, 24);
-            cam.targetTexture = rt;
-            cam.Render();
+            // If the cameras are not auto-rendering, you can force-render:
+            // cam.Render();
 
+            // Read pixels from the persistent RT
+            var prev = RenderTexture.active;
             RenderTexture.active = rt;
-            readTex.ReadPixels(new Rect(0, 0, inputWidth, inputHeight), 0, 0);
+            readTex.ReadPixels(new Rect(0, 0, rt.width, rt.height), 0, 0);
             readTex.Apply();
-            RenderTexture.active = null;
-            cam.targetTexture = null;
-            Destroy(rt);
+            RenderTexture.active = prev;
 
-            // Convert image to tensor
-            using var input = TextureConverter.ToTensor(readTex, channels: 3);
-
-            // Run inference
+            var input = new Tensor<float>(new TensorShape(1, 3, inputHeight, inputWidth));
+            TextureConverter.ToTensor(readTex, input, new TextureTransform());
             worker.Schedule(input);
+            input.Dispose();
 
             // Parse detections for this camera
             List<DetectionInfo> detections = ParseDetections(worker, cam);
@@ -195,7 +222,6 @@ public class YoloObjectDetector : MonoBehaviour
             Ray ray = cam.ScreenPointToRay(screenPoint);
             if (Physics.Raycast(ray, out RaycastHit hit))
             {
-                // Draw a debug line above car with detected color
                 var det = new DetectionInfo
                 {
                     label = label,
@@ -210,7 +236,7 @@ public class YoloObjectDetector : MonoBehaviour
 
                 detections.Add(det);
 
-                Debug.Log($"[YOLO] Detected {det.label} conf={det.confidence:F2} color={det.colour} at {det.worldPos}");
+                UnityEngine.Debug.Log($"[YOLO] Detected {det.label} conf={det.confidence:F2} color={det.colour} at {det.worldPos}");
 
                 // Debug visualization
                 Vector3 debugPos = det.worldPos + Vector3.up * 2f;
@@ -218,7 +244,7 @@ public class YoloObjectDetector : MonoBehaviour
                 if (ColorUtility.TryParseHtmlString(det.colour, out Color parsed))
                     debugCol = parsed;
 
-                Debug.DrawLine(det.worldPos, debugPos, debugCol, 2f);
+                UnityEngine.Debug.DrawLine(det.worldPos, debugPos, debugCol, 2f);
             }
         }
 
@@ -277,8 +303,6 @@ public class YoloObjectDetector : MonoBehaviour
         return GetClosestColorName(avgH, avgS, avgV);
     }
 
-
-
     private string GetClosestColorName(float hue, float sat, float val)
     {
         if (val < 0.2f) return "black";
@@ -295,9 +319,6 @@ public class YoloObjectDetector : MonoBehaviour
 
         return "gray";
     }
-
-
-
 
     private string GetRelativeDirection(Camera cam, Vector3 worldPos)
     {
@@ -325,5 +346,7 @@ public class YoloObjectDetector : MonoBehaviour
     void OnDestroy()
     {
         worker?.Dispose();
+        // If we created RTs at runtime, you may optionally release them here.
+        // for (int i = 0; i < visionRTs?.Length; i++) if (visionRTs[i]) visionRTs[i].Release();
     }
 }
