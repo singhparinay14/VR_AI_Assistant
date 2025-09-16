@@ -12,6 +12,9 @@ EditorBuildSettings:
     path: Assets/Scenes/OpenWorld.unity
     guid: fdedadb48a644f340b993810f63ee5c5
   - enabled: 1
+    path: Assets/Scenes/Gallery_NonAI.unity
+    guid: 9ce0adbb6f950084faf59fb021796a0e
+  - enabled: 1
     path: Assets/Scenes/Gallery_AI.unity
     guid: 8b9854a8d18d0664ca977b32e4c8479d
   m_configObjects:
