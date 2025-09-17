@@ -52,6 +52,9 @@ public class PropsDetector : MonoBehaviour
     private Model model;
     private Texture2D readTex;
 
+    // Runtime labels actually used everywhere in this script
+    private string[] cocoLabels;
+
     public bool HasLabel(string word)
     {
         if (string.IsNullOrWhiteSpace(word)) return false;
@@ -65,16 +68,23 @@ public class PropsDetector : MonoBehaviour
     public event Action<List<DetectionInfo>> OnDetections;
 
     // COCO-80 labels (Ultralytics order)
-    private readonly string[] cocoLabels = new string[] {
-        "person","bicycle","car","motorcycle","airplane","bus","train","truck","boat","traffic light",
-        "fire hydrant","stop sign","parking meter","bench","bird","cat","dog","horse","sheep","cow",
-        "elephant","bear","zebra","giraffe","backpack","umbrella","handbag","tie","suitcase","frisbee",
-        "skis","snowboard","sports ball","kite","baseball bat","baseball glove","skateboard","surfboard","tennis racket","bottle",
-        "wine glass","cup","fork","knife","spoon","bowl","banana","apple","sandwich","orange",
-        "broccoli","carrot","hot dog","pizza","donut","cake","chair","couch","potted plant","bed",
-        "dining table","toilet","tv","laptop","mouse","remote","keyboard","cell phone","microwave","oven",
-        "toaster","sink","refrigerator","book","clock","vase","scissors","teddy bear","hair drier","toothbrush"
-    };
+    [Header("Labels")]
+    [SerializeField] private TextAsset cocoLabelsText; // drag your coco_labels_80.txt here
+
+    // Built-in fallback (Ultralytics COCO-80 order)
+    private static readonly string[] CocoLabelsFallback = new string[] {
+    "person","bicycle","car","motorcycle","airplane","bus","train","truck","boat","traffic light",
+    "fire hydrant","stop sign","parking meter","bench","bird","cat","dog","horse","sheep","cow",
+    "elephant","bear","zebra","giraffe","backpack","umbrella","handbag","tie","suitcase","frisbee",
+    "skis","snowboard","sports ball","kite","baseball bat","baseball glove","skateboard","surfboard","tennis racket","bottle",
+    "wine glass","cup","fork","knife","spoon","bowl","banana","apple","sandwich","orange",
+    "broccoli","carrot","hot dog","pizza","donut","cake","chair","couch","potted plant","bed",
+    "dining table","toilet","tv","laptop","mouse","remote","keyboard","cell phone","microwave","oven",
+    "toaster","sink","refrigerator","book","clock","vase","scissors","teddy bear","hair drier","toothbrush"
+};
+
+
+
 
     private HashSet<int> allowSet;           // resolved class indices
     private List<DetectionInfo> latestDetections = new();
@@ -119,10 +129,38 @@ public class PropsDetector : MonoBehaviour
             enabled = false; return;
         }
 
-        // Resolve allowlist indices
+        // Load labels from text asset (comma or newline separated). Expect 80 for YOLOv8n COCO.
+        if (cocoLabelsText != null)
+        {
+            var parsed = cocoLabelsText.text
+                .Split(new[] { '\n', '\r', ',' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(s => s.Trim())
+                .Where(s => !string.IsNullOrEmpty(s))
+                .ToArray();
+
+            if (parsed.Length == 80)
+            {
+                cocoLabels = parsed;
+            }
+            else
+            {
+                Debug.LogWarning($"PropsDetector: labels file has {parsed.Length} entries, expected 80. Using built-in fallback.");
+                cocoLabels = CocoLabelsFallback;
+            }
+        }
+        else
+        {
+            cocoLabels = CocoLabelsFallback;
+        }
+
+        // Resolve allowlist indices using loaded labels
         allowSet = (allowedLabels == null || allowedLabels.Length == 0)
             ? null
-            : new HashSet<int>(allowedLabels.Select(n => Array.IndexOf(cocoLabels, n)).Where(idx => idx >= 0));
+            : new HashSet<int>(
+                allowedLabels.Select(n => Array.IndexOf(cocoLabels, n))
+                             .Where(idx => idx >= 0)
+              );
+
 
         model = ModelLoader.Load(modelAsset);
         worker = new Worker(model, BackendType.GPUCompute);
