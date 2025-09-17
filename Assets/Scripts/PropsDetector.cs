@@ -4,16 +4,14 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Debug = UnityEngine.Debug; // resolve Debug ambiguity
-using UnityEngine.Experimental.Rendering;      // for GraphicsFormat
-
+using UnityEngine.Experimental.Rendering; // GraphicsFormat
 
 public class PropsDetector : MonoBehaviour
 {
     [Header("Debug Viz")]
     public bool drawRays = true;
     public bool drawAfterNMS = true;     // draw rays only for final kept boxes
-    public int maxRaysDrawn = 20;        // cap per frame
-    public float rayLength = 20f;
+    public int maxRaysDrawn = 20;       // cap per frame
     public float rayDuration = 0.15f;
     public Color rayHitColor = Color.green;
     public Color rayMissColor = Color.red;
@@ -21,6 +19,10 @@ public class PropsDetector : MonoBehaviour
     public LayerMask hitMask = ~0;       // everything
     public string[] debugOnlyTheseLabels; // leave empty to draw all kept labels
 
+    [Header("Raycast Mapping")]
+    public bool invertYForRay = true;         // flip Y (YOLO top-left -> Unity bottom-left)
+    public bool useCameraRangeForRays = true; // automatic: farClip - nearClip
+    public float rayLength = 100f;            // fallback manual length if auto is off
 
     [Header("Model & Vision")]
     public ModelAsset modelAsset;          // drag yolov8n (Model Asset) here
@@ -44,11 +46,21 @@ public class PropsDetector : MonoBehaviour
 
     [Header("Logging")]
     public bool verbose = false;             // per-detection logs
-    public int printEveryNFrames = 10;       // counts summary cadence
+    public int printEveryNFrames = 10;      // counts summary cadence
 
     private Worker worker;
     private Model model;
     private Texture2D readTex;
+
+    public bool HasLabel(string word)
+    {
+        if (string.IsNullOrWhiteSpace(word)) return false;
+        string w = word.ToLower();
+        // Match whole labels or partials (e.g., "table" matches "dining table")
+        return cocoLabels.Any(l => l.ToLower().Contains(w));
+    }
+
+
 
     public event Action<List<DetectionInfo>> OnDetections;
 
@@ -73,7 +85,7 @@ public class PropsDetector : MonoBehaviour
         if (visionRTs == null || visionRTs.Length != visionCameras.Length)
             visionRTs = new RenderTexture[visionCameras.Length];
 
-        // Create/bind one persistent RT per camera and assign once (URP RG needs depth)
+        // Create/bind one persistent RT per camera and assign once (URP RenderGraph needs depth)
         for (int i = 0; i < visionCameras.Length; i++)
         {
             var cam = visionCameras[i];
@@ -84,7 +96,7 @@ public class PropsDetector : MonoBehaviour
                 var desc = new RenderTextureDescriptor(inputWidth, inputHeight)
                 {
                     graphicsFormat = GraphicsFormat.R8G8B8A8_UNorm,
-                    depthStencilFormat = GraphicsFormat.D24_UNorm_S8_UInt, // required by URP Render Graph
+                    depthStencilFormat = GraphicsFormat.D24_UNorm_S8_UInt,
                     msaaSamples = 1,
                     sRGB = true,
                     mipCount = 1,
@@ -95,7 +107,7 @@ public class PropsDetector : MonoBehaviour
                 rt.Create();
                 visionRTs[i] = rt;
             }
-            cam.targetTexture = visionRTs[i];   // bind permanently
+            cam.targetTexture = visionRTs[i]; // bind permanently
         }
     }
 
@@ -159,17 +171,19 @@ public class PropsDetector : MonoBehaviour
         if (latestDetections.Count > 0)
             OnDetections?.Invoke(latestDetections);
 
-        // === Print a compact count summary every N frames ===
+        // Compact count summary every N frames
         if (Time.frameCount % Mathf.Max(1, printEveryNFrames) == 0)
         {
             var counts = latestDetections
                 .GroupBy(d => d.label)
                 .Select(g => $"{g.Key}:{g.Count()}")
                 .ToArray();
-            if (counts.Length == 0) Debug.Log("[YOLO-props] none");
-            else Debug.Log("[YOLO-props] " + string.Join(", ", counts));
+            Debug.Log(counts.Length == 0 ? "[YOLO-props] none" : "[YOLO-props] " + string.Join(", ", counts));
         }
     }
+
+    private float GetCastLength(Camera cam)
+        => useCameraRangeForRays ? Mathf.Max(0.1f, cam.farClipPlane - cam.nearClipPlane) : rayLength;
 
     private List<DetectionInfo> ParseDetectionsProps(Worker worker, Camera cam)
     {
@@ -190,32 +204,30 @@ public class PropsDetector : MonoBehaviour
         for (int i = 0; i < numBoxes; i++)
         {
             // --- box ---
-            float cx, cy, w, h;
-            if (channelsFirst) { cx = cpu[0, 0, i]; cy = cpu[0, 1, i]; w = cpu[0, 2, i]; h = cpu[0, 3, i]; }
-            else { cx = cpu[0, i, 0]; cy = cpu[0, i, 1]; w = cpu[0, i, 2]; h = cpu[0, i, 3]; }
+            float bx, by, bw, bh;
+            if (channelsFirst) { bx = cpu[0, 0, i]; by = cpu[0, 1, i]; bw = cpu[0, 2, i]; bh = cpu[0, 3, i]; }
+            else { bx = cpu[0, i, 0]; by = cpu[0, i, 1]; bw = cpu[0, i, 2]; bh = cpu[0, i, 3]; }
 
-            // --- best class (Ultralytics v8: class probs; objectness already folded) ---
+            // --- best class ---
             int bestClass = -1; float bestScore = 0f;
             for (int c = 4; c < numAttrs; c++)
             {
                 float s = channelsFirst ? cpu[0, c, i] : cpu[0, i, c];
-                s = Sigmoid(s); // safe
+                s = Sigmoid(s);
                 if (s > bestScore) { bestScore = s; bestClass = c - 4; }
             }
             if (bestClass < 0) continue;
 
-            // Apply allowlist if set
+            // Allowlist
             if (allowSet != null && !allowSet.Contains(bestClass)) continue;
 
-            // Confidence gate
+            // Confidence + size gates (model-pixel space)
             float conf = bestScore;
             if (conf < confidenceThreshold) continue;
+            if (bh < minBoxHeightPx) continue;
+            if ((bw * bh) < minBoxAreaPx) continue;
 
-            // Size filters (on model input pixels)
-            if (h < minBoxHeightPx) continue;
-            if ((w * h) < minBoxAreaPx) continue;
-
-            candidates.Add((bestClass, conf, cx, cy, w, h));
+            candidates.Add((bestClass, conf, bx, by, bw, bh));
         }
 
         // Keep top-K to avoid NMS overload
@@ -228,29 +240,21 @@ public class PropsDetector : MonoBehaviour
         {
             string label = cocoLabels[c.cls];
 
-            float x = (c.cx - c.w / 2f) / inputWidth * cam.pixelWidth;
-            float y = (c.cy - c.h / 2f) / inputHeight * cam.pixelHeight;
-            float bw = c.w / inputWidth * cam.pixelWidth;
-            float bh = c.h / inputHeight * cam.pixelHeight;
-            Rect bbox = new Rect(x, y, bw, bh);
+            // model (pixels) -> camera (pixels)
+            float px = (c.cx - c.w * 0.5f) / inputWidth * cam.pixelWidth;
+            float py = (c.cy - c.h * 0.5f) / inputHeight * cam.pixelHeight;
+            float pw = c.w / inputWidth * cam.pixelWidth;
+            float ph = c.h / inputHeight * cam.pixelHeight;
+            Rect bbox = new Rect(px, py, pw, ph);
 
-            Vector3 screenPoint = new Vector3(x + bw / 2f, y + bh / 2f, cam.nearClipPlane + 1f);
-            Ray ray = cam.ScreenPointToRay(screenPoint);
-            bool hitOk = Physics.Raycast(ray, out RaycastHit hit, rayLength, hitMask);
+            // bbox center -> viewport (0..1), with optional Y flip
+            float vx = (px + pw * 0.5f) / cam.pixelWidth;
+            float vy = (py + ph * 0.5f) / cam.pixelHeight;
+            if (invertYForRay) vy = 1f - vy;
 
-            //if (drawRays)
-            //{
-            //    var col = hitOk ? rayHitColor : rayMissColor;
-            //    // draw the ray; stop at hit distance if we hit, otherwise full length
-            //    Debug.DrawRay(ray.origin, ray.direction * (hitOk ? hit.distance : rayLength), col, rayDuration);
-            //    if (hitOk)
-            //    {
-            //        // little “spark” at the hit point
-            //        Debug.DrawLine(hit.point + Vector3.up * 0.05f, hit.point - Vector3.up * 0.05f, hitMarkerColor, rayDuration);
-            //        Debug.DrawLine(hit.point + Vector3.right * 0.05f, hit.point - Vector3.right * 0.05f, hitMarkerColor, rayDuration);
-            //        Debug.DrawLine(hit.point + Vector3.forward * 0.05f, hit.point - Vector3.forward * 0.05f, hitMarkerColor, rayDuration);
-            //    }
-            //}
+            Ray ray = cam.ViewportPointToRay(new Vector3(vx, vy, 0f));
+            float castLen = GetCastLength(cam);
+            bool hitOk = Physics.Raycast(ray, out RaycastHit hit, castLen, hitMask);
 
             var det = new DetectionInfo
             {
@@ -265,7 +269,6 @@ public class PropsDetector : MonoBehaviour
             };
             detections.Add(det);
 
-
             if (verbose)
                 Debug.Log($"[YOLO-props] {det.label} conf={det.confidence:0.00} box=({(int)bbox.x},{(int)bbox.y},{(int)bbox.width},{(int)bbox.height}) hit={hitOk}");
         }
@@ -276,7 +279,6 @@ public class PropsDetector : MonoBehaviour
         if (drawRays && drawAfterNMS)
         {
             int drawn = 0;
-            // optional label filter
             HashSet<string> allowDbg = (debugOnlyTheseLabels != null && debugOnlyTheseLabels.Length > 0)
                 ? new HashSet<string>(debugOnlyTheseLabels)
                 : null;
@@ -286,17 +288,16 @@ public class PropsDetector : MonoBehaviour
                 if (drawn >= Mathf.Max(1, maxRaysDrawn)) break;
                 if (allowDbg != null && !allowDbg.Contains(d.label)) continue;
 
-                // Center of bbox -> screen point -> ray
-                Vector3 screenPoint = new Vector3(
-                    d.bbox.x + d.bbox.width * 0.5f,
-                    d.bbox.y + d.bbox.height * 0.5f,
-                    cam.nearClipPlane + 1f
-                );
-                Ray ray = cam.ScreenPointToRay(screenPoint);
+                float vx = (d.bbox.x + d.bbox.width * 0.5f) / cam.pixelWidth;
+                float vy = (d.bbox.y + d.bbox.height * 0.5f) / cam.pixelHeight;
+                if (invertYForRay) vy = 1f - vy;
 
-                bool hitOk = Physics.Raycast(ray, out RaycastHit hit, rayLength, hitMask);
-                var col = hitOk ? rayHitColor : rayMissColor;
-                Debug.DrawRay(ray.origin, ray.direction * (hitOk ? hit.distance : rayLength), col, rayDuration);
+                Ray ray = cam.ViewportPointToRay(new Vector3(vx, vy, 0f));
+                float castLen = GetCastLength(cam);
+                bool hitOk = Physics.Raycast(ray, out RaycastHit hit, castLen, hitMask);
+
+                Debug.DrawRay(ray.origin, ray.direction * (hitOk ? hit.distance : castLen),
+                              hitOk ? rayHitColor : rayMissColor, rayDuration);
 
                 if (hitOk)
                 {
@@ -310,7 +311,6 @@ public class PropsDetector : MonoBehaviour
         }
 
         return kept;
-
     }
 
     // === Helpers matching your style ===

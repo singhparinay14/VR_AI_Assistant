@@ -3727,7 +3727,7 @@ PrefabInstance:
     m_Modifications:
     - target: {fileID: -8679921383154817045, guid: 47460fa582e782d4dbb6dfea4943211b, type: 3}
       propertyPath: m_LocalPosition.x
-      value: 78.08
+      value: 78.79
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: 47460fa582e782d4dbb6dfea4943211b, type: 3}
       propertyPath: m_LocalPosition.y
@@ -3735,7 +3735,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: 47460fa582e782d4dbb6dfea4943211b, type: 3}
       propertyPath: m_LocalPosition.z
-      value: -76.04
+      value: -75.29
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: 47460fa582e782d4dbb6dfea4943211b, type: 3}
       propertyPath: m_LocalRotation.w
@@ -4135,8 +4135,8 @@ Transform:
   m_GameObject: {fileID: 619996817}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0.7071068, z: 0, w: 0.7071068}
-  m_LocalPosition: {x: 12.37, y: 2.25, z: 5.12}
-  m_LocalScale: {x: 0.3, y: 4.4, z: 55.4}
+  m_LocalPosition: {x: 10.12, y: 2.25, z: 5.12}
+  m_LocalScale: {x: 0.3, y: 4.4, z: 59}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 1348351379}
@@ -12019,8 +12019,8 @@ Transform:
   m_GameObject: {fileID: 1549575421}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0.7071068, z: 0, w: 0.7071068}
-  m_LocalPosition: {x: 12.37, y: 2.25, z: -4.14}
-  m_LocalScale: {x: 0.3, y: 4.4, z: 55.4}
+  m_LocalPosition: {x: 10.12, y: 2.25, z: -4.14}
+  m_LocalScale: {x: 0.3, y: 4.4, z: 59}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 1348351379}
@@ -12334,7 +12334,6 @@ MonoBehaviour:
   drawRays: 1
   drawAfterNMS: 1
   maxRaysDrawn: 20
-  rayLength: 20
   rayDuration: 0.15
   rayHitColor: {r: 0, g: 1, b: 0, a: 1}
   rayMissColor: {r: 1, g: 0, b: 0, a: 1}
@@ -12343,6 +12342,9 @@ MonoBehaviour:
     serializedVersion: 2
     m_Bits: 23
   debugOnlyTheseLabels: []
+  invertYForRay: 1
+  useCameraRangeForRays: 1
+  rayLength: 20
   modelAsset: {fileID: 5022602860645237092, guid: 62733875186df394a9b101ad9a985415, type: 3}
   visionCameras:
   - {fileID: 1632845539}
@@ -12641,6 +12643,8 @@ MonoBehaviour:
   detectors:
   - {fileID: 1563781113}
   - {fileID: 1216347087}
+  propDetectors:
+  - {fileID: 1562080542}
   botNavigator: {fileID: 1077019689}
   pathDrawer: {fileID: 44277248}
 --- !u!4 &1574782569

@@ -27,9 +27,12 @@ public class OpenAIResponse
 public class ChatGPTManager : MonoBehaviour
 {
     [Header("Vision Link")]
-    [SerializeField] private List<YoloObjectDetector> detectors;
+    [SerializeField] private List<YoloObjectDetector> detectors = new();   // cars (fine-tuned)
+    [SerializeField] private List<PropsDetector> propDetectors = new(); // props (COCO-80)
     [SerializeField] private BotNavigator botNavigator;
     [SerializeField] private PathDrawer pathDrawer;
+
+    [SerializeField] private bool autoFindPropDetectors = true; // auto-wire fallback
 
     private string visionContext = "nothing";
     private string openAI_APIKey;
@@ -43,19 +46,35 @@ public class ChatGPTManager : MonoBehaviour
 
     private void OnEnable()
     {
-        foreach (var detector in detectors)
+        // Auto-find props if not manually assigned
+        if (autoFindPropDetectors && (propDetectors == null || propDetectors.Count == 0))
+            propDetectors = FindObjectsByType<PropsDetector>(FindObjectsSortMode.None).ToList();
+
+        if (detectors != null)
         {
-            if (detector != null)
-                detector.OnDetections += HandleDetections;
+            foreach (var detector in detectors)
+                if (detector != null) detector.OnDetections += HandleDetections;
+        }
+
+        if (propDetectors != null)
+        {
+            foreach (var p in propDetectors)
+                if (p != null) p.OnDetections += HandleDetections;
         }
     }
 
     private void OnDisable()
     {
-        foreach (var detector in detectors)
+        if (detectors != null)
         {
-            if (detector != null)
-                detector.OnDetections -= HandleDetections;
+            foreach (var detector in detectors)
+                if (detector != null) detector.OnDetections -= HandleDetections;
+        }
+
+        if (propDetectors != null)
+        {
+            foreach (var p in propDetectors)
+                if (p != null) p.OnDetections -= HandleDetections;
         }
     }
 
@@ -74,8 +93,81 @@ public class ChatGPTManager : MonoBehaviour
         visionContext = string.Join(", ", grouped);
     }
 
+    // ---------- NEW: richer scene facts from ObjectDescriptor ----------
+    private IEnumerable<DetectionInfo> GetAllDetections()
+    {
+        var all = new List<DetectionInfo>();
+        if (detectors != null)
+            foreach (var d in detectors)
+                if (d != null) all.AddRange(d.GetLatestDetections());
+
+        if (propDetectors != null)
+            foreach (var p in propDetectors)
+                if (p != null) all.AddRange(p.GetLatestDetections());
+
+        return all;
+    }
+
+    private bool TryGetDescriptorNear(Vector3 pos, out ObjectDescriptor od, out GameObject go)
+    {
+        // Small radius to catch the collider with the descriptor
+        const float radius = 0.8f;
+        var cols = Physics.OverlapSphere(pos, radius);
+        foreach (var c in cols)
+        {
+            var d = c.GetComponentInParent<ObjectDescriptor>();
+            if (d != null)
+            {
+                od = d; go = d.gameObject;
+                return true;
+            }
+        }
+        od = null; go = null;
+        return false;
+    }
+
+    private string BuildSceneFacts(int maxItems = 8)
+    {
+        var dets = GetAllDetections()
+            .OrderBy(d => d.distance < 0 ? float.MaxValue : d.distance) // nearest first
+            .Take(40) // cap work
+            .ToList();
+
+        if (dets.Count == 0) return "";
+
+        var lines = new List<string>();
+        int added = 0;
+
+        foreach (var d in dets)
+        {
+            if (added >= maxItems) break;
+
+            if (TryGetDescriptorNear(d.worldPos, out var od, out var go))
+            {
+                // Use descriptor details when available
+                var title = string.IsNullOrWhiteSpace(od.objectName) ? d.label : od.objectName;
+                var artist = string.IsNullOrWhiteSpace(od.artistName) ? "" : $" by {od.artistName}";
+                var desc = string.IsNullOrWhiteSpace(od.description) ? "" : $". {od.description}";
+                lines.Add($"{d.colour} {d.label}: \"{title}\"{artist}{desc}");
+            }
+            else
+            {
+                // Fallback to detection info only
+                var distTxt = d.distance > 0 ? $" (~{d.distance:0.0}m)" : "";
+                lines.Add($"{d.colour} {d.label}{distTxt}");
+            }
+            added++;
+        }
+
+        return string.Join(" | ", lines);
+    }
+    // -------------------------------------------------------------------
+
     public IEnumerator SendMessageToOpenAI(string userMessage, System.Action<string> callback)
     {
+        // Build richer, structured context
+        string sceneFacts = BuildSceneFacts(8);
+
         var requestData = new
         {
             model = "gpt-3.5-turbo",
@@ -83,11 +175,11 @@ public class ChatGPTManager : MonoBehaviour
                 new {
                     role = "system",
                     content =
-                        "You are a helpful VR assistant. " +
-                        "You receive live computer-vision detections. " +
-                        $"Right now you see: {visionContext}. " +
-                        "Use this when answering questions about " +
-                        "what is in front of you or its properties."
+                        "You are a helpful VR assistant inside a virtual gallery. " +
+                        "Use the live computer-vision context and the scene facts below to answer precisely. " +
+                        $"Detections summary: {visionContext}. " +
+                        (string.IsNullOrEmpty(sceneFacts) ? "" : $"Scene facts: {sceneFacts}. ") +
+                        "If the user asks about an object, describe it succinctly (title/artist/color/nearby info) before taking action."
                 },
                 new { role = "user", content = userMessage }
             },
@@ -114,12 +206,14 @@ public class ChatGPTManager : MonoBehaviour
         {
             string responseJson = request.downloadHandler.text;
             var response = JsonConvert.DeserializeObject<OpenAIResponse>(responseJson);
-            string aiResponse = response.choices[0].message.content.Trim();
+            string reply = response.choices[0].message.content.Trim();
 
-            UnityEngine.Debug.Log("GPT says: " + aiResponse);
+            UnityEngine.Debug.Log("GPT says: " + reply);
+
+            // Reuse your guidance behaviour (works for cars and props)
             TryHandleNavigation(userMessage);
 
-            callback(aiResponse);
+            callback(reply);
         }
     }
 
@@ -127,10 +221,11 @@ public class ChatGPTManager : MonoBehaviour
     {
         string msg = userMessage.ToLower();
 
-        if (!msg.Contains("guide me to") && !msg.Contains("take me to"))
+        // trigger words like before
+        if (!msg.Contains("guide me to") && !msg.Contains("take me to") && !msg.Contains("lead me to"))
             return;
 
-        UnityEngine.Debug.Log("[TryHandleNavigation] Attempting to guide to red car");
+        UnityEngine.Debug.Log("[TryHandleNavigation] Attempting to guide to target object");
 
         string[] words = msg.Split(' ');
         string targetLabel = "";
@@ -144,13 +239,17 @@ public class ChatGPTManager : MonoBehaviour
             }
             else
             {
-                foreach (var d in detectors)
-                {
-                    if (d.HasLabel(word))
-                    {
-                        targetLabel = word.ToLower();
-                    }
-                }
+                // cars (fine-tuned)
+                if (detectors != null)
+                    foreach (var d in detectors)
+                        if (d != null && d.HasLabel(word))
+                            targetLabel = word.ToLower();
+
+                // props (COCO-80)
+                if (propDetectors != null)
+                    foreach (var p in propDetectors)
+                        if (p != null && p.HasLabel(word))
+                            targetLabel = word.ToLower();
             }
         }
 
@@ -160,52 +259,49 @@ public class ChatGPTManager : MonoBehaviour
             return;
         }
 
-        // Aggregate detections from all detectors
-        var allDetections = new List<DetectionInfo>();
-        foreach (var d in detectors)
-        {
-            allDetections.AddRange(d.GetLatestDetections());
-        }
+        // Gather all detections (cars + props)
+        var allDetections = GetAllDetections().ToList();
 
-        // Optional: log all detected objects
-        foreach (var det in allDetections)
-        {
-            UnityEngine.Debug.Log($"Detected: {det.label}, Color: {det.colour}, Pos: {det.worldPos}, Distance: {det.distance}");
-        }
-
-        // Filter based on label and optional color
-        var filtered = allDetections
-            .Where(d => d.label.ToLower() == targetLabel);
-
+        // Filter by label and optional color
+        var filtered = allDetections.Where(d => d.label.ToLower() == targetLabel);
         if (!string.IsNullOrEmpty(targetColor))
-        {
             filtered = filtered.Where(d => d.colour.ToLower() == targetColor);
+
+        // If descriptions exist, prefer the one with an ObjectDescriptor
+        DetectionInfo best = default;
+        float bestScore = float.MaxValue;
+
+        foreach (var det in filtered)
+        {
+            float score = det.distance > 0 ? det.distance : 9999f;
+            if (TryGetDescriptorNear(det.worldPos, out _, out _))
+                score *= 0.75f; // prefer described pieces slightly
+
+            if (score < bestScore)
+            {
+                bestScore = score;
+                best = det;
+            }
         }
 
-        var bestMatch = filtered
-            .OrderBy(d => d.distance)
-            .FirstOrDefault();
-
-        if (!string.IsNullOrEmpty(bestMatch.label))
+        if (!string.IsNullOrEmpty(best.label))
         {
-            botNavigator?.MoveToTarget(bestMatch.worldPos);
-            pathDrawer?.DrawPathTo(bestMatch.worldPos);
-            UnityEngine.Debug.Log($"Navigating to {targetColor} {targetLabel} at {bestMatch.worldPos}");
+            botNavigator?.MoveToTarget(best.worldPos);
+            pathDrawer?.DrawPathTo(best.worldPos);
+            UnityEngine.Debug.Log($"Navigating to {(string.IsNullOrEmpty(targetColor) ? "" : targetColor + " ")}{targetLabel} at {best.worldPos}");
         }
         else
         {
-            UnityEngine.Debug.LogWarning($"No matching {targetColor} {targetLabel} found.");
+            UnityEngine.Debug.LogWarning($"No matching {(string.IsNullOrEmpty(targetColor) ? "" : targetColor + " ")}{targetLabel} found.");
         }
     }
 
-    public bool HasContextReady()
-    {
-        return !string.IsNullOrEmpty(visionContext) && visionContext != "nothing";
-    }
+    public bool HasContextReady() =>
+        !string.IsNullOrEmpty(visionContext) && visionContext != "nothing";
 
     private bool IsColor(string word)
     {
-        string[] colors = { "red", "gray", "blue", "green", "yellow", "white", "black", "orange", "purple", "pink" };
+        string[] colors = { "red", "gray", "blue", "green", "yellow", "white", "black", "orange", "purple", "pink", "brown" };
         return colors.Contains(word.ToLower());
     }
 }
