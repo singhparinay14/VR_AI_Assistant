@@ -325,10 +325,10 @@ public class ChatGPTManager : MonoBehaviour
                     role = "system",
                     content =
                         "You are a helpful VR assistant inside a virtual gallery. " +
-                        "Use the live computer-vision context and the scene facts below to answer precisely. " +
+                        "Use the live computer-vision context and the scene facts below to communicate precisely. " +
                         $"Detections summary: {visionContext}. " +
                         (string.IsNullOrEmpty(sceneFacts) ? "" : $"Scene facts: {sceneFacts}. ") +
-                        "If the user asks about an object, describe it succinctly (title/artist/color/nearby info) before taking action."
+                        "If the user asks about an object, describe it briefly with the information you have about the said object before taking action."
                 },
                 new { role = "user", content = userMessage }
             },
@@ -569,6 +569,18 @@ public class ChatGPTManager : MonoBehaviour
                 d.colour.Equals(targetColor, StringComparison.InvariantCultureIgnoreCase));
 
         var candidates = filtered.ToList();
+
+        // Merge near-identical candidates (same label, within 1.5m)
+        float r2 = 1.5f * 1.5f;
+        var merged = new List<DetectionInfo>();
+        foreach (var d in candidates.OrderByDescending(c => c.confidence))
+        {
+            if (!merged.Any(m => m.label.Equals(d.label, StringComparison.InvariantCultureIgnoreCase) &&
+                                 (m.worldPos - d.worldPos).sqrMagnitude <= r2))
+                merged.Add(d);
+        }
+        candidates = merged;
+
         if (candidates.Count == 0)
         {
             Debug.LogWarning($"[Nav] No detections for '{targetLabel}' color='{(targetColor ?? "any")}'.");

@@ -144,7 +144,7 @@ public class PropsDetector : MonoBehaviour
             cam.backgroundColor = Color.black;
         }
 
-        // ✅ init caches ONCE (outside the camera loop)
+        // init caches ONCE (outside the camera loop)
         _camCache = new List<DetectionInfo>[visionCameras.Length];
         _camCacheTime = new float[visionCameras.Length];
         for (int k = 0; k < visionCameras.Length; k++)
@@ -340,6 +340,10 @@ public class PropsDetector : MonoBehaviour
             bool hitOk = Physics.Raycast(ray, out RaycastHit hit, castLen, hitMask);
             raycastsDone++;
 
+            // ✅ FIX: declare root & surfaceName BEFORE the initializer
+            Transform root = hitOk ? hit.collider.transform.root : null;
+            string surfaceName = hitOk ? (root != null ? root.name : hit.collider.name) : "nohit";
+
             var det = new DetectionInfo
             {
                 label = label,
@@ -348,7 +352,7 @@ public class PropsDetector : MonoBehaviour
                 worldPos = hitOk ? hit.point : cam.transform.position + cam.transform.forward * 2f,
                 distance = hitOk ? hit.distance : -1f,
                 relDir = GetRelativeDirection(cam, hitOk ? hit.point : cam.transform.position + cam.transform.forward * 2f),
-                surface = hitOk ? hit.collider.gameObject.name : "nohit",
+                surface = surfaceName,
                 confidence = c.conf
             };
             detections.Add(det);

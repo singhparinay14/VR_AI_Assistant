@@ -31,13 +31,11 @@ public class YoloObjectDetector : MonoBehaviour
     [Range(0f, 5f)] public float debugLineDuration = 0f;
 
     [Header("Debug Rays (visualize casts)")]
-    [Tooltip("Draw rays from each camera through kept boxes (helps verify ray hits).")]
-    public bool drawRays = false;
-    [Tooltip("Only draw rays for final (post-NMS) boxes.")]
+    public bool drawRays = true;
     public bool drawAfterNMS = true;
     public int maxRaysDrawn = 20;
-    public float rayDuration = 0.1f;
-    public Color rayHitColor = Color.cyan;
+    public float rayDuration = 0.15f;
+    public Color rayHitColor = Color.green;
     public Color rayMissColor = Color.red;
     public Color hitMarkerColor = Color.yellow;
 
@@ -109,18 +107,16 @@ public class YoloObjectDetector : MonoBehaviour
                     antiAliasing = 1
                 };
                 rt.Create();
-                visionRTs[i] = rt; // IMPORTANT
+                visionRTs[i] = rt;
             }
 
             cam.targetTexture = visionRTs[i];
-            // camera perf hints
             cam.allowHDR = false;
             cam.allowMSAA = false;
             cam.clearFlags = CameraClearFlags.SolidColor;
             cam.backgroundColor = Color.black;
         }
 
-        // init per-camera caches
         _camCache = new List<DetectionInfo>[visionCameras.Length];
         _camCacheTime = new float[visionCameras.Length];
         for (int k = 0; k < visionCameras.Length; k++)
@@ -145,11 +141,9 @@ public class YoloObjectDetector : MonoBehaviour
     {
         if (visionCameras == null || visionCameras.Length == 0) return;
 
-        // throttle per-detector
         if (Time.time < _nextTick) return;
         _nextTick = Time.time + 1f / Mathf.Max(1f, targetInferenceFPS);
 
-        // stagger: process one camera per tick to avoid spikes
         int startIndex = 0;
         int camerasThisTick = visionCameras.Length;
         if (staggerCameras && visionCameras.Length > 1)
@@ -166,13 +160,11 @@ public class YoloObjectDetector : MonoBehaviour
             RenderTexture rt = (visionRTs != null && i < visionRTs.Length) ? visionRTs[i] : null;
             if (!cam || !rt) continue;
 
-            // feed RT directly (no CPU ReadPixels for inference)
             var input = new Tensor<float>(new TensorShape(1, 3, inputHeight, inputWidth));
             TextureConverter.ToTensor(rt, input, _texTransform);
             worker.Schedule(input);
             input.Dispose();
 
-            // Only if we need colour sampling: refresh readTex once for this camera
             if (enableColourSampling && readTex != null)
             {
                 var prev = RenderTexture.active;
@@ -182,7 +174,6 @@ public class YoloObjectDetector : MonoBehaviour
                 RenderTexture.active = prev;
             }
 
-            // parse and cache this camera's detections
             var detections = ParseDetections(worker, cam);
 
             if (maxDetectionsPerCamera > 0)
@@ -193,14 +184,13 @@ public class YoloObjectDetector : MonoBehaviour
             _camCacheTime[i] = Time.time;
         }
 
-        // Build the union from recent per-camera caches (cacheTTL)
         var combinedDetections = new List<DetectionInfo>(32);
         for (int k = 0; k < visionCameras.Length; k++)
             if (Time.time - _camCacheTime[k] <= cacheTTL)
                 combinedDetections.AddRange(_camCache[k]);
 
         latestDetections = combinedDetections;
-        OnDetections?.Invoke(latestDetections); // always publish, even if empty
+        OnDetections?.Invoke(latestDetections);
     }
 
     private List<DetectionInfo> ParseDetections(Worker worker, Camera cam)
@@ -265,15 +255,43 @@ public class YoloObjectDetector : MonoBehaviour
 
             if (raycastsDone >= raycastCap) continue;
 
-            // build a viewport ray from the bbox center (optionally flip Y)
-            float vx = (x + bw * 0.5f) / cam.pixelWidth;
-            float vy = (y + bh * 0.5f) / cam.pixelHeight;
+            // === Ray from YOLO's normalized center ===
+            float vx = cx / inputWidth;   // cx,cy are in model pixels (0..inputWidth/Height)
+            float vy = cy / inputHeight;
             if (invertYForRay) vy = 1f - vy;
 
             Ray ray = cam.ViewportPointToRay(new Vector3(vx, vy, 0f));
             float castLen = GetCastLength(cam);
-            bool hitOk = Physics.Raycast(ray, out RaycastHit hit, castLen, hitMask);
+
+            // Hit triggers too (many imported prefabs use trigger colliders)
+            bool hitOk = Physics.Raycast(ray, out RaycastHit hit, castLen, hitMask, QueryTriggerInteraction.Collide);
+
+            // If the center misses useful geometry (or obviously hits a big plane), probe twice more
+            if (!hitOk || (hit.collider != null && hit.collider.bounds.size.y < 0.05f)) // likely floor/wall plane
+            {
+                // Left and right thirds of the bbox
+                float vxL = ((cx - w * 0.25f) / inputWidth);
+                float vxR = ((cx + w * 0.25f) / inputWidth);
+                float vyC = vy;
+
+                Ray rL = cam.ViewportPointToRay(new Vector3(vxL, vyC, 0f));
+                Ray rR = cam.ViewportPointToRay(new Vector3(vxR, vyC, 0f));
+
+                RaycastHit hL, hR;
+                bool okL = Physics.Raycast(rL, out hL, castLen, hitMask, QueryTriggerInteraction.Collide);
+                bool okR = Physics.Raycast(rR, out hR, castLen, hitMask, QueryTriggerInteraction.Collide);
+
+                // Pick the best of (center, left, right)
+                if (okL && (!hitOk || hL.distance < hit.distance)) { hit = hL; hitOk = true; ray = rL; }
+                if (okR && (!hitOk || hR.distance < hit.distance)) { hit = hR; hitOk = true; ray = rR; }
+            }
+
+
             raycastsDone++;
+
+            // Use root name so sub-colliders (wheel/body) collapse to one object
+            Transform root = hitOk ? hit.collider.transform.root : null;
+            string surfaceName = hitOk ? (root != null ? root.name : hit.collider.name) : "nohit";
 
             var det = new DetectionInfo
             {
@@ -283,7 +301,7 @@ public class YoloObjectDetector : MonoBehaviour
                 worldPos = hitOk ? hit.point : cam.transform.position + cam.transform.forward * 2f,
                 distance = hitOk ? hit.distance : -1f,
                 relDir = GetRelativeDirection(cam, hitOk ? hit.point : cam.transform.position + cam.transform.forward * 2f),
-                surface = hitOk ? hit.collider.gameObject.name : "nohit",
+                surface = surfaceName,
                 confidence = confidence
             };
 
@@ -294,31 +312,32 @@ public class YoloObjectDetector : MonoBehaviour
         }
 
         // NMS on bbox (per label)
-        var kept = ApplyNMS(detections, 0.6f);
+        var kept = ApplyNMS(detections, 0.7f);
 
 #if UNITY_EDITOR
-        if (drawRays)
+        if (drawRays && drawAfterNMS)
         {
             int drawn = 0;
             foreach (var d in kept.OrderByDescending(k => k.confidence))
             {
                 if (drawn >= Mathf.Max(1, maxRaysDrawn)) break;
 
-                // rebuild the ray from bbox center for visualization
                 float vx = (d.bbox.x + d.bbox.width * 0.5f) / cam.pixelWidth;
                 float vy = (d.bbox.y + d.bbox.height * 0.5f) / cam.pixelHeight;
                 if (invertYForRay) vy = 1f - vy;
 
                 var r2 = cam.ViewportPointToRay(new Vector3(vx, vy, 0f));
-                // draw short segment; the hit line was drawn in Update if needed
-                Debug.DrawRay(r2.origin, r2.direction * 3f, rayHitColor, rayDuration);
+                float castLen = GetCastLength(cam);
+                bool hitNow = Physics.Raycast(r2, out RaycastHit h2, castLen, hitMask);
 
-                // small cross at the stored worldPos (if we had a hit)
-                if (d.distance >= 0f)
+                Debug.DrawRay(r2.origin, r2.direction * (hitNow ? h2.distance : castLen),
+                              hitNow ? rayHitColor : rayMissColor, rayDuration);
+
+                if (hitNow)
                 {
-                    Debug.DrawLine(d.worldPos + Vector3.up * 0.05f, d.worldPos - Vector3.up * 0.05f, hitMarkerColor, rayDuration);
-                    Debug.DrawLine(d.worldPos + Vector3.right * 0.05f, d.worldPos - Vector3.right * 0.05f, hitMarkerColor, rayDuration);
-                    Debug.DrawLine(d.worldPos + Vector3.forward * 0.05f, d.worldPos - Vector3.forward * 0.05f, hitMarkerColor, rayDuration);
+                    Debug.DrawLine(h2.point + Vector3.up * 0.05f,       h2.point - Vector3.up * 0.05f,       hitMarkerColor, rayDuration);
+                    Debug.DrawLine(h2.point + Vector3.right * 0.05f,    h2.point - Vector3.right * 0.05f,    hitMarkerColor, rayDuration);
+                    Debug.DrawLine(h2.point + Vector3.forward * 0.05f,  h2.point - Vector3.forward * 0.05f,  hitMarkerColor, rayDuration);
                 }
 
                 drawn++;
@@ -331,8 +350,8 @@ public class YoloObjectDetector : MonoBehaviour
 
     private float GetCastLength(Camera cam)
     {
-        // Cap the ray length so we don't hit far-away skybox or stray colliders
-        return Mathf.Min(50f, Mathf.Max(2f, cam.farClipPlane));
+        // match PropsDetector: cast across the camera range
+        return Mathf.Max(0.1f, cam.farClipPlane - cam.nearClipPlane);
     }
 
     private float Sigmoid(float x) => 1f / (1f + Mathf.Exp(-x));
@@ -424,7 +443,10 @@ public class YoloObjectDetector : MonoBehaviour
     }
 
     public bool HasLabel(string word)
-        => carLabels.Any(l => l.ToLower().Contains(word.ToLower()));
+    {
+        if (string.IsNullOrWhiteSpace(word)) return false;
+        return carLabels.Any(l => l.IndexOf(word, StringComparison.OrdinalIgnoreCase) >= 0);
+    }
 
     public List<DetectionInfo> GetLatestDetections()
         => latestDetections ?? new List<DetectionInfo>();

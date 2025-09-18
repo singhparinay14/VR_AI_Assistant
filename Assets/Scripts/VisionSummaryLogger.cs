@@ -88,7 +88,7 @@ public class VisionSummaryLogger : MonoBehaviour
             .SelectMany(v => v);
 
         // Deduplicate across cameras: same label + same surface, or same label within ~0.75m
-        var deduped = DedupByLabelAndProximity(merged, 0.75f).ToList();
+        var deduped = DedupByLabelAndProximity(merged, 1.5f).ToList();
 
         string msg;
         if (deduped.Count == 0)
