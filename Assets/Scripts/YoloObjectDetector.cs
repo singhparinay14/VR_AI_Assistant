@@ -1,14 +1,10 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using Unity.Sentis;
 using UnityEngine;
 using Debug = UnityEngine.Debug;
 
-/// <summary>
-/// Holds YOLO detection info
-/// </summary>
 public struct DetectionInfo
 {
     public string label;
@@ -24,50 +20,59 @@ public struct DetectionInfo
 public class YoloObjectDetector : MonoBehaviour
 {
     [Header("Performance")]
-    [Tooltip("Max inferences per second for THIS detector (across its cameras).")]
     public float targetInferenceFPS = 10f;
-
-    [Tooltip("Spread cameras over frames to avoid spikes.")]
     public bool staggerCameras = true;
-
-    [Tooltip("Limit post-NMS results per camera to reduce raycasts and color sampling.")]
     public int maxDetectionsPerCamera = 5;
-
-    [Tooltip("Compute color names from pixels (heavy). Turn OFF unless you need it right now).")]
     public bool enableColourSampling = false;
 
     [Header("Debug")]
-    public bool showDebugLines = false;     // OFF by default
-    public bool logDetections = false;      // OFF by default
-    [Range(0f, 5f)] public float debugLineDuration = 0f; // 0 = draw for one frame
+    public bool showDebugLines = false;
+    public bool logDetections = false;
+    [Range(0f, 5f)] public float debugLineDuration = 0f;
+
+    [Header("Debug Rays (visualize casts)")]
+    [Tooltip("Draw rays from each camera through kept boxes (helps verify ray hits).")]
+    public bool drawRays = false;
+    [Tooltip("Only draw rays for final (post-NMS) boxes.")]
+    public bool drawAfterNMS = true;
+    public int maxRaysDrawn = 20;
+    public float rayDuration = 0.1f;
+    public Color rayHitColor = Color.cyan;
+    public Color rayMissColor = Color.red;
+    public Color hitMarkerColor = Color.yellow;
+
+    [Header("Raycast")]
+    [Tooltip("Flip Y when mapping bbox center to ray (YOLO top-left -> Unity bottom-left).")]
+    public bool invertYForRay = true;
+    [Tooltip("Layers the bbox-center ray can hit.")]
+    public LayerMask hitMask = ~0;
 
     [Header("Model & Vision")]
     public ModelAsset modelAsset;
-    public Camera[] visionCameras;             // Multiple cameras supported
+    public Camera[] visionCameras;
     public int inputWidth = 640;
     public int inputHeight = 640;
     [Range(0f, 1f)] public float confidenceThreshold = 0.5f;
 
-    // Persistent RTs matching visionCameras (assigned/created at runtime)
+    [Header("Aggregation")]
+    [Tooltip("How long (seconds) to keep each camera's last results when building the union.")]
+    public float cacheTTL = 0.6f;
+    private List<DetectionInfo>[] _camCache;
+    private float[] _camCacheTime;
+
     [Tooltip("Optional: assign per-camera RTs here; otherwise they are created in Awake().")]
     public RenderTexture[] visionRTs;
 
     private Worker worker;
     private Model model;
-
-    // (Optional) reusable transform for TextureConverter
     private readonly TextureTransform _texTransform = new TextureTransform();
-
-    // Throttle / stagger timing
     private float _nextTick = 0f;
     private int _frameCounter = 0;
-
-    // Only used if enableColourSampling == true
     private Texture2D readTex;
 
     public event Action<List<DetectionInfo>> OnDetections;
 
-    // === Your fine-tuned labels ===
+    // Your fine-tuned labels (keep order aligned with the model export)
     private readonly string[] carLabels = {
         "Ford Mustang GT Convertible 2020",
         "Audi R8 2014",
@@ -104,16 +109,24 @@ public class YoloObjectDetector : MonoBehaviour
                     antiAliasing = 1
                 };
                 rt.Create();
-                visionRTs[i] = rt;
+                visionRTs[i] = rt; // IMPORTANT
             }
 
-            cam.targetTexture = visionRTs[i];   // bind permanently
-            // Camera-side perf tweaks
+            cam.targetTexture = visionRTs[i];
+            // camera perf hints
             cam.allowHDR = false;
             cam.allowMSAA = false;
             cam.clearFlags = CameraClearFlags.SolidColor;
             cam.backgroundColor = Color.black;
-            // Consider culling masks to include only needed layers
+        }
+
+        // init per-camera caches
+        _camCache = new List<DetectionInfo>[visionCameras.Length];
+        _camCacheTime = new float[visionCameras.Length];
+        for (int k = 0; k < visionCameras.Length; k++)
+        {
+            _camCache[k] = new List<DetectionInfo>();
+            _camCacheTime[k] = -999f;
         }
     }
 
@@ -122,24 +135,21 @@ public class YoloObjectDetector : MonoBehaviour
         model = ModelLoader.Load(modelAsset);
         worker = new Worker(model, BackendType.GPUCompute);
 
-        // Only allocate CPU texture if color sampling will be used
         if (enableColourSampling)
             readTex = new Texture2D(inputWidth, inputHeight, TextureFormat.RGB24, false);
 
-        UnityEngine.Debug.Log($"YoloObjectDetector initialized with {visionCameras.Length} cameras.");
+        Debug.Log($"YoloObjectDetector initialized with {visionCameras.Length} cameras.");
     }
 
     void Update()
     {
         if (visionCameras == null || visionCameras.Length == 0) return;
 
-        // Throttle overall detector rate
+        // throttle per-detector
         if (Time.time < _nextTick) return;
         _nextTick = Time.time + 1f / Mathf.Max(1f, targetInferenceFPS);
 
-        var combinedDetections = new List<DetectionInfo>(16);
-
-        // Stagger: process one camera per tick to avoid spikes
+        // stagger: process one camera per tick to avoid spikes
         int startIndex = 0;
         int camerasThisTick = visionCameras.Length;
         if (staggerCameras && visionCameras.Length > 1)
@@ -156,13 +166,13 @@ public class YoloObjectDetector : MonoBehaviour
             RenderTexture rt = (visionRTs != null && i < visionRTs.Length) ? visionRTs[i] : null;
             if (!cam || !rt) continue;
 
-            // Create a short-lived input tensor (Sentis pattern: Schedule + Dispose)
+            // feed RT directly (no CPU ReadPixels for inference)
             var input = new Tensor<float>(new TensorShape(1, 3, inputHeight, inputWidth));
             TextureConverter.ToTensor(rt, input, _texTransform);
             worker.Schedule(input);
             input.Dispose();
 
-            // If (and only if) we need color sampling, refresh readTex once for this camera
+            // Only if we need colour sampling: refresh readTex once for this camera
             if (enableColourSampling && readTex != null)
             {
                 var prev = RenderTexture.active;
@@ -172,59 +182,25 @@ public class YoloObjectDetector : MonoBehaviour
                 RenderTexture.active = prev;
             }
 
-            // Parse detections for this camera
-            List<DetectionInfo> detections = ParseDetections(worker, cam);
+            // parse and cache this camera's detections
+            var detections = ParseDetections(worker, cam);
 
-            // Keep only the top-K (post-NMS) to reduce downstream work
             if (maxDetectionsPerCamera > 0)
-                detections = detections
-                    .OrderByDescending(d => d.confidence)
-                    .Take(maxDetectionsPerCamera)
-                    .ToList();
+                detections = detections.OrderByDescending(d => d.confidence)
+                                       .Take(maxDetectionsPerCamera).ToList();
 
-            combinedDetections.AddRange(detections);
+            _camCache[i] = detections;
+            _camCacheTime[i] = Time.time;
         }
+
+        // Build the union from recent per-camera caches (cacheTTL)
+        var combinedDetections = new List<DetectionInfo>(32);
+        for (int k = 0; k < visionCameras.Length; k++)
+            if (Time.time - _camCacheTime[k] <= cacheTTL)
+                combinedDetections.AddRange(_camCache[k]);
 
         latestDetections = combinedDetections;
-        OnDetections?.Invoke(latestDetections);
-    }
-
-    // IoU (Intersection over Union) helper
-    private float IoU(Rect a, Rect b)
-    {
-        float interX = Mathf.Max(a.xMin, b.xMin);
-        float interY = Mathf.Max(a.yMin, b.yMin);
-        float interW = Mathf.Min(a.xMax, b.xMax) - interX;
-        float interH = Mathf.Min(a.yMax, b.yMax) - interY;
-
-        if (interW <= 0 || interH <= 0) return 0f;
-
-        float intersection = interW * interH;
-        float union = a.width * a.height + b.width * b.height - intersection;
-        return intersection / union;
-    }
-
-    // Non-Maximum Suppression
-    private List<DetectionInfo> ApplyNMS(List<DetectionInfo> detections, float iouThreshold = 0.45f)
-    {
-        var results = new List<DetectionInfo>();
-
-        // Sort by confidence (highest first)
-        var sorted = detections.OrderByDescending(d => d.confidence).ToList();
-
-        while (sorted.Count > 0)
-        {
-            var best = sorted[0];
-            results.Add(best);
-            sorted.RemoveAt(0);
-
-            // Remove overlapping boxes of the same class
-            sorted = sorted.Where(d =>
-                !(d.label == best.label && IoU(d.bbox, best.bbox) > iouThreshold)
-            ).ToList();
-        }
-
-        return results;
+        OnDetections?.Invoke(latestDetections); // always publish, even if empty
     }
 
     private List<DetectionInfo> ParseDetections(Worker worker, Camera cam)
@@ -239,17 +215,12 @@ public class YoloObjectDetector : MonoBehaviour
 
         using var cpu = output.ReadbackAndClone();
 
-        // Support both layouts:
-        //  - channels-first: [1, A, B]  (A=numAttrs, B=numBoxes)
-        //  - channels-last : [1, B, A]
         int A = cpu.shape[1];
         int B = cpu.shape[2];
-        bool channelsFirst = (A <= B);     // e.g., 15 vs 8400
+        bool channelsFirst = (A <= B);
         int numBoxes = channelsFirst ? B : A;
         int numAttrs = channelsFirst ? A : B;
 
-        // Our car model may be 4 box + [obj?] + numClasses (10)
-        // hasObjness if numAttrs == 5 + classes; else assume 4 + classes
         int classes = carLabels.Length;
         bool hasObj = (numAttrs == (5 + classes));
         int clsStart = hasObj ? 5 : 4;
@@ -260,22 +231,17 @@ public class YoloObjectDetector : MonoBehaviour
 
             if (channelsFirst)
             {
-                cx = cpu[0, 0, i];
-                cy = cpu[0, 1, i];
-                w = cpu[0, 2, i];
-                h = cpu[0, 3, i];
+                cx = cpu[0, 0, i]; cy = cpu[0, 1, i];
+                w = cpu[0, 2, i]; h = cpu[0, 3, i];
                 if (hasObj) obj = Sigmoid(cpu[0, 4, i]);
             }
             else
             {
-                cx = cpu[0, i, 0];
-                cy = cpu[0, i, 1];
-                w = cpu[0, i, 2];
-                h = cpu[0, i, 3];
+                cx = cpu[0, i, 0]; cy = cpu[0, i, 1];
+                w = cpu[0, i, 2]; h = cpu[0, i, 3];
                 if (hasObj) obj = Sigmoid(cpu[0, i, 4]);
             }
 
-            // Best class
             int bestClass = -1; float bestScore = 0f;
             for (int c = clsStart; c < numAttrs; c++)
             {
@@ -290,65 +256,96 @@ public class YoloObjectDetector : MonoBehaviour
 
             string label = carLabels[bestClass];
 
-            // Scale bbox to camera pixel space
+            // model space -> camera pixel space
             float x = (cx - w * 0.5f) / inputWidth * cam.pixelWidth;
             float y = (cy - h * 0.5f) / inputHeight * cam.pixelHeight;
             float bw = w / inputWidth * cam.pixelWidth;
             float bh = h / inputHeight * cam.pixelHeight;
-
             Rect bbox = new Rect(x, y, bw, bh);
 
             if (raycastsDone >= raycastCap) continue;
 
-            // Raycast from bbox center
-            Vector3 screenPoint = new Vector3(x + bw * 0.5f, y + bh * 0.5f, 0f);
-            Ray ray = cam.ScreenPointToRay(screenPoint);
-            if (Physics.Raycast(ray, out RaycastHit hit))
+            // build a viewport ray from the bbox center (optionally flip Y)
+            float vx = (x + bw * 0.5f) / cam.pixelWidth;
+            float vy = (y + bh * 0.5f) / cam.pixelHeight;
+            if (invertYForRay) vy = 1f - vy;
+
+            Ray ray = cam.ViewportPointToRay(new Vector3(vx, vy, 0f));
+            float castLen = GetCastLength(cam);
+            bool hitOk = Physics.Raycast(ray, out RaycastHit hit, castLen, hitMask);
+            raycastsDone++;
+
+            var det = new DetectionInfo
             {
-                raycastsDone++;
+                label = label,
+                bbox = bbox,
+                colour = enableColourSampling ? SampleColour(bbox, cam) : "gray",
+                worldPos = hitOk ? hit.point : cam.transform.position + cam.transform.forward * 2f,
+                distance = hitOk ? hit.distance : -1f,
+                relDir = GetRelativeDirection(cam, hitOk ? hit.point : cam.transform.position + cam.transform.forward * 2f),
+                surface = hitOk ? hit.collider.gameObject.name : "nohit",
+                confidence = confidence
+            };
 
-                var det = new DetectionInfo
-                {
-                    label = label,
-                    bbox = bbox,
-                    colour = enableColourSampling ? SampleColour(bbox, cam) : "gray",
-                    worldPos = hit.point,
-                    distance = hit.distance,
-                    relDir = GetRelativeDirection(cam, hit.point),
-                    surface = hit.collider.gameObject.name,
-                    confidence = confidence
-                };
+            detections.Add(det);
 
-                detections.Add(det);
-
-                if (logDetections)
-                    Debug.Log($"[YOLO-cars] {det.label} {det.confidence:0.00} @ {det.worldPos}");
-            }
+            if (logDetections)
+                Debug.Log($"[YOLO-cars] {det.label} {det.confidence:0.00} hit={hitOk} @ {det.worldPos}");
         }
 
-        return ApplyNMS(detections, 0.6f);
+        // NMS on bbox (per label)
+        var kept = ApplyNMS(detections, 0.6f);
+
+#if UNITY_EDITOR
+        if (drawRays)
+        {
+            int drawn = 0;
+            foreach (var d in kept.OrderByDescending(k => k.confidence))
+            {
+                if (drawn >= Mathf.Max(1, maxRaysDrawn)) break;
+
+                // rebuild the ray from bbox center for visualization
+                float vx = (d.bbox.x + d.bbox.width * 0.5f) / cam.pixelWidth;
+                float vy = (d.bbox.y + d.bbox.height * 0.5f) / cam.pixelHeight;
+                if (invertYForRay) vy = 1f - vy;
+
+                var r2 = cam.ViewportPointToRay(new Vector3(vx, vy, 0f));
+                // draw short segment; the hit line was drawn in Update if needed
+                Debug.DrawRay(r2.origin, r2.direction * 3f, rayHitColor, rayDuration);
+
+                // small cross at the stored worldPos (if we had a hit)
+                if (d.distance >= 0f)
+                {
+                    Debug.DrawLine(d.worldPos + Vector3.up * 0.05f, d.worldPos - Vector3.up * 0.05f, hitMarkerColor, rayDuration);
+                    Debug.DrawLine(d.worldPos + Vector3.right * 0.05f, d.worldPos - Vector3.right * 0.05f, hitMarkerColor, rayDuration);
+                    Debug.DrawLine(d.worldPos + Vector3.forward * 0.05f, d.worldPos - Vector3.forward * 0.05f, hitMarkerColor, rayDuration);
+                }
+
+                drawn++;
+            }
+        }
+#endif
+
+        return kept;
     }
 
-
-    // sigmoid helper
-    private float Sigmoid(float x)
+    private float GetCastLength(Camera cam)
     {
-        return 1f / (1f + Mathf.Exp(-x));
+        // Cap the ray length so we don't hit far-away skybox or stray colliders
+        return Mathf.Min(50f, Mathf.Max(2f, cam.farClipPlane));
     }
+
+    private float Sigmoid(float x) => 1f / (1f + Mathf.Exp(-x));
 
     private string SampleColour(Rect bbox, Camera cam)
     {
-        // Only called when enableColourSampling == true.
-        // We refresh readTex once per camera per tick in Update().
         if (readTex == null) return "gray";
 
-        // Clamp bbox inside texture
         int x = Mathf.Clamp((int)bbox.x, 0, readTex.width - 1);
         int y = Mathf.Clamp((int)bbox.y, 0, readTex.height - 1);
         int w = Mathf.Clamp((int)bbox.width, 1, readTex.width - x);
         int h = Mathf.Clamp((int)bbox.height, 1, readTex.height - y);
 
-        // Focus on central/top region
         int cropX = x + w / 4;
         int cropW = w / 2;
         int cropY = y + h / 4;
@@ -357,33 +354,50 @@ public class YoloObjectDetector : MonoBehaviour
         Color[] pixels = readTex.GetPixels(cropX, cropY, cropW, cropH);
         if (pixels.Length == 0) return "unknown";
 
-        float sumH = 0f, sumS = 0f, sumV = 0f;
-        int count = 0;
-
+        float sumH = 0f, sumS = 0f, sumV = 0f; int count = 0;
         foreach (Color c in pixels)
         {
             Color.RGBToHSV(c, out float hue, out float sat, out float val);
-
-            // Filter out dull or extreme pixels
             if (sat < 0.25f) continue;
             if (val < 0.25f || val > 0.9f) continue;
-
-            // Optional: ignore floor/wall tones (cyan-ish / blue-ish range)
-            if (hue > 0.5f && hue < 0.65f) continue;
-
-            sumH += hue;
-            sumS += sat;
-            sumV += val;
-            count++;
+            if (hue > 0.5f && hue < 0.65f) continue; // optional cyan exclusion
+            sumH += hue; sumS += sat; sumV += val; count++;
         }
+        if (count == 0) return "gray";
 
-        if (count == 0) return "gray"; // fallback
-
-        float avgH = sumH / count;
-        float avgS = sumS / count;
-        float avgV = sumV / count;
-
+        float avgH = sumH / count, avgS = sumS / count, avgV = sumV / count;
         return GetClosestColorName(avgH, avgS, avgV);
+    }
+
+    private float IoU(Rect a, Rect b)
+    {
+        float interX = Mathf.Max(a.xMin, b.xMin);
+        float interY = Mathf.Max(a.yMin, b.yMin);
+        float interW = Mathf.Min(a.xMax, b.xMax) - interX;
+        float interH = Mathf.Min(a.yMax, b.yMax) - interY;
+        if (interW <= 0 || interH <= 0) return 0f;
+        float intersection = interW * interH;
+        float union = a.width * a.height + b.width * b.height - intersection;
+        return intersection / union;
+    }
+
+    private List<DetectionInfo> ApplyNMS(List<DetectionInfo> detections, float iouThreshold = 0.45f)
+    {
+        var results = new List<DetectionInfo>();
+        // NMS per label to avoid cross-class suppression
+        var byLabel = detections.GroupBy(d => d.label);
+        foreach (var grp in byLabel)
+        {
+            var list = grp.OrderByDescending(d => d.confidence).ToList();
+            while (list.Count > 0)
+            {
+                var best = list[0];
+                results.Add(best);
+                list.RemoveAt(0);
+                list.RemoveAll(d => IoU(best.bbox, d.bbox) > iouThreshold);
+            }
+        }
+        return results;
     }
 
     private string GetClosestColorName(float hue, float sat, float val)
@@ -391,7 +405,6 @@ public class YoloObjectDetector : MonoBehaviour
         if (val < 0.2f) return "black";
         if (val > 0.9f && sat < 0.2f) return "white";
         if (sat < 0.25f) return "gray";
-
         if (hue < 0.05f || hue > 0.95f) return "red";
         if (hue < 0.15f) return "orange";
         if (hue < 0.25f) return "yellow";
@@ -399,7 +412,6 @@ public class YoloObjectDetector : MonoBehaviour
         if (hue < 0.60f) return "cyan";
         if (hue < 0.75f) return "blue";
         if (hue < 0.90f) return "purple";
-
         return "gray";
     }
 
@@ -412,24 +424,10 @@ public class YoloObjectDetector : MonoBehaviour
     }
 
     public bool HasLabel(string word)
-    {
-        foreach (var label in carLabels)
-        {
-            if (label.ToLower().Contains(word.ToLower()))
-                return true;
-        }
-        return false;
-    }
+        => carLabels.Any(l => l.ToLower().Contains(word.ToLower()));
 
     public List<DetectionInfo> GetLatestDetections()
-    {
-        return latestDetections ?? new List<DetectionInfo>();
-    }
+        => latestDetections ?? new List<DetectionInfo>();
 
-    void OnDestroy()
-    {
-        worker?.Dispose();
-        // If we created RTs at runtime, you may optionally release them here.
-        // for (int i = 0; i < visionRTs?.Length; i++) if (visionRTs[i]) visionRTs[i].Release();
-    }
+    void OnDestroy() => worker?.Dispose();
 }

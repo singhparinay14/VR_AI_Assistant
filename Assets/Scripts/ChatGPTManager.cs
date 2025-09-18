@@ -42,6 +42,58 @@ public class ChatGPTManager : MonoBehaviour
     [SerializeField] private string lastGuidedLabel = null; // for "guide me to it"
     [SerializeField] private bool navDebugLogs = true;
 
+    private static string Normalize(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return string.Empty;
+        return System.Text.RegularExpressions.Regex.Replace(s.ToLowerInvariant(), @"[^a-z0-9]+", "");
+    }
+
+    private static bool ContainsQualifier(string p)
+    {
+        if (string.IsNullOrEmpty(p)) return false;
+        // recognize distance/side/“closest” words and simple colors
+        return System.Text.RegularExpressions.Regex.IsMatch(
+            p, @"\b(closest|nearest|farther|farthest|furthest|leftmost|rightmost|left|right|center|middle|red|blue|green|gray|grey|black|white|yellow|orange|purple|cyan)\b",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    }
+
+    // === De-dup config ===
+    [Header("Vision De-dup")]
+    [SerializeField] private float gridSizeMeters = 1.5f; // quantization size when no descriptor
+    [SerializeField] private bool preferObjectDescriptorId = true; // use ObjectDescriptor if present
+
+    // Build a stable key for the same physical object across cameras/frames
+    private string MakeStableKey(DetectionInfo d)
+    {
+        // Prefer a nearby ObjectDescriptor (stable across frames)
+        if (preferObjectDescriptorId && TryGetDescriptorNear(d.worldPos, out var od, out var go) && go != null)
+            return $"{d.label}|obj:{go.GetInstanceID()}";
+
+        // Fallback: coarse world grid (x/z only)
+        float g = Mathf.Max(0.25f, gridSizeMeters);
+        int gx = Mathf.FloorToInt(d.worldPos.x / g);
+        int gz = Mathf.FloorToInt(d.worldPos.z / g);
+        return $"{d.label}|gx:{gx}|gz:{gz}";
+    }
+
+    // Collapse many raw detections to one per physical object (best confidence wins)
+    private List<DetectionInfo> DedupDetections(IEnumerable<DetectionInfo> dets)
+    {
+        var bestByKey = new Dictionary<string, DetectionInfo>();
+        foreach (var d in dets)
+        {
+            var key = MakeStableKey(d);
+            if (!bestByKey.TryGetValue(key, out var cur) || d.confidence > cur.confidence)
+                bestByKey[key] = d;
+        }
+        return bestByKey.Values.ToList();
+    }
+
+
+
+    //private readonly Dictionary<string, (DetectionInfo det, float lastSeen)> _ttl = new();
+    [SerializeField] private float ttlSeconds = 1.5f;
+
     [Header("Autowire")]
     [SerializeField] private bool autoFindPropDetectors = true;
 
@@ -51,9 +103,22 @@ public class ChatGPTManager : MonoBehaviour
 
     // ----- parsing helpers -----
     private static readonly Regex TriggerRegex = new(
-        @"\b(?:guide\s+me\s+to|take\s+me\s+to|lead\s+me\s+to)\s+(?<target>.+)$",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled
-    );
+        @"(?:\b(?:guide|take|lead|walk|go)\s+me\s+to\s+(?<target>.+)$)|(?:\b(?:go|walk)\s+to\s+(?<target>.+)$)|(?:\bnearest\s+(?<target>.+)$)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    [Serializable]
+    private struct Seen
+    {
+        public DetectionInfo det;
+        public float lastSeen;
+    }
+
+    // TTL cache: keeps most recent sightings for a short time window
+    private readonly Dictionary<string, Seen> _ttl = new Dictionary<string, Seen>();
+
+    // If this field already exists in your file, keep your value and do NOT duplicate it.
+    // [SerializeField] private float ttlSeconds = 1.5f;  // <-- you already have this
+
 
     private static readonly string[] ColorWords =
     {
@@ -145,18 +210,48 @@ public class ChatGPTManager : MonoBehaviour
 
     private void HandleDetections(List<DetectionInfo> list)
     {
-        if (list == null || list.Count == 0)
+        float now = Time.time;
+
+        // 1) Update TTL with all detections we just received
+        if (list != null)
+        {
+            foreach (var d in list)
+            {
+                string key = MakeStableKey(d);
+
+                if (!_ttl.TryGetValue(key, out var seen) || d.confidence > seen.det.confidence)
+                    _ttl[key] = new Seen { det = d, lastSeen = now };
+                else
+                    _ttl[key] = new Seen { det = seen.det, lastSeen = now };
+            }
+        }
+
+        // 2) Purge any entries older than ttlSeconds
+        var toRemove = new List<string>();
+        foreach (var kv in _ttl)
+            if (now - kv.Value.lastSeen > ttlSeconds)
+                toRemove.Add(kv.Key);
+        for (int i = 0; i < toRemove.Count; i++)
+            _ttl.Remove(toRemove[i]);
+
+        // 3) Build stable vision context from the remaining TTL items
+        if (_ttl.Count == 0)
         {
             visionContext = "nothing";
             return;
         }
 
-        var grouped = list
+        var dedupList = DedupDetections(_ttl.Values.Select(v => v.det));
+        var groupedParts = dedupList
             .GroupBy(d => $"{d.colour} {d.label}")
+            .OrderByDescending(g => g.Count())
             .Select(g => $"{g.Count()} {g.Key}");
 
-        visionContext = string.Join(", ", grouped);
+        visionContext = string.Join(", ", groupedParts);
     }
+
+
+
 
     // ======== Scene facts (ObjectDescriptor-aware) ========
 
@@ -187,10 +282,10 @@ public class ChatGPTManager : MonoBehaviour
 
     private string BuildSceneFacts(int maxItems = 8)
     {
-        var dets = GetAllDetections()
+        var dets = DedupDetections(GetAllDetections())
             .Where(d => d.distance > 0)
-            .GroupBy(d => d.label)                     // group by label
-            .SelectMany(g => g.OrderBy(d => d.distance).Take(3))   // up to 3 per label
+            .GroupBy(d => d.label)
+            .SelectMany(g => g.OrderBy(d => d.distance).Take(3))
             .OrderBy(d => d.distance)
             .Take(maxItems)
             .ToList();
@@ -283,7 +378,8 @@ public class ChatGPTManager : MonoBehaviour
         var m = TriggerRegex.Match(msgLower);
         if (!m.Success) return null;
         var phrase = m.Groups["target"].Value.Trim();
-        phrase = Regex.Replace(phrase, @"^(the|a|an)\s+", "");
+        // strip odd punctuation like trailing "/"
+        phrase = Regex.Replace(phrase, @"[^a-zA-Z0-9\s\-]", "");
         return phrase.Trim(' ', '.', '!', '?');
     }
 
@@ -432,7 +528,7 @@ public class ChatGPTManager : MonoBehaviour
         if (!msg.Contains("guide me to") && !msg.Contains("take me to") && !msg.Contains("lead me to"))
             return;
 
-        var allDetections = GetAllDetections().ToList();
+        var allDetections = DedupDetections(GetAllDetections()).ToList();
         if (allDetections.Count == 0)
         {
             if (navDebugLogs) Debug.LogWarning("[Nav] No live detections yet.");

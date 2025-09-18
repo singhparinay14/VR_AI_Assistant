@@ -41,6 +41,14 @@ public class PropsDetector : MonoBehaviour
     public int inputHeight = 640;
     [Range(0f, 1f)] public float confidenceThreshold = 0.25f;
 
+    // === Cache union across cameras ===
+    [Header("Aggregation")]
+    [Tooltip("How long (seconds) to keep each camera's last results when building the union.")]
+    public float cacheTTL = 0.6f;
+
+    private List<DetectionInfo>[] _camCache;
+    private float[] _camCacheTime;
+
     [Tooltip("Optional: assign per-camera RTs here; otherwise they are created in Awake().")]
     public RenderTexture[] visionRTs;
 
@@ -135,6 +143,15 @@ public class PropsDetector : MonoBehaviour
             cam.clearFlags = CameraClearFlags.SolidColor;
             cam.backgroundColor = Color.black;
         }
+
+        // ✅ init caches ONCE (outside the camera loop)
+        _camCache = new List<DetectionInfo>[visionCameras.Length];
+        _camCacheTime = new float[visionCameras.Length];
+        for (int k = 0; k < visionCameras.Length; k++)
+        {
+            _camCache[k] = new List<DetectionInfo>();
+            _camCacheTime[k] = -999f;
+        }
     }
 
     void Start()
@@ -145,7 +162,7 @@ public class PropsDetector : MonoBehaviour
             enabled = false; return;
         }
 
-        // Load labels from text asset (comma or newline separated). Expect 80 for YOLOv8n COCO.
+        // Load labels
         if (cocoLabelsText != null)
         {
             var parsed = cocoLabelsText.text
@@ -154,26 +171,20 @@ public class PropsDetector : MonoBehaviour
                 .Where(s => !string.IsNullOrEmpty(s))
                 .ToArray();
 
-            if (parsed.Length == 80) cocoLabels = parsed;
-            else { Debug.LogWarning($"PropsDetector: labels file has {parsed.Length} entries, expected 80. Using built-in fallback."); cocoLabels = CocoLabelsFallback; }
+            cocoLabels = (parsed.Length == 80) ? parsed : CocoLabelsFallback;
+            if (parsed.Length != 80) Debug.LogWarning($"PropsDetector: labels file has {parsed.Length} entries, expected 80. Using built-in fallback.");
         }
-        else
-        {
-            cocoLabels = CocoLabelsFallback;
-        }
+        else cocoLabels = CocoLabelsFallback;
 
-        // Resolve allowlist indices using loaded labels
+        // Resolve allowlist indices
         allowSet = (allowedLabels == null || allowedLabels.Length == 0)
             ? null
-            : new HashSet<int>(
-                allowedLabels.Select(n => Array.IndexOf(cocoLabels, n))
-                             .Where(idx => idx >= 0)
-              );
+            : new HashSet<int>(allowedLabels.Select(n => Array.IndexOf(cocoLabels, n))
+                                            .Where(idx => idx >= 0));
 
         model = ModelLoader.Load(modelAsset);
         worker = new Worker(model, BackendType.GPUCompute);
 
-        // Only allocate CPU texture if we actually sample color
         if (enableColourSampling)
             readTex = new Texture2D(inputWidth, inputHeight, TextureFormat.RGB24, false);
 
@@ -184,11 +195,9 @@ public class PropsDetector : MonoBehaviour
     {
         if (visionCameras == null || visionCameras.Length == 0) return;
 
-        // Throttle overall detector rate
+        // Throttle
         if (Time.time < _nextTick) return;
         _nextTick = Time.time + 1f / Mathf.Max(1f, targetInferenceFPS);
-
-        List<DetectionInfo> combinedDetections = new();
 
         // Stagger: process one camera per tick to avoid spikes
         int startIndex = 0;
@@ -218,7 +227,6 @@ public class PropsDetector : MonoBehaviour
             worker.Schedule(input);
             input.Dispose();
 
-            // If we need colour sampling, refresh readTex once per camera this tick
             if (enableColourSampling && readTex != null)
             {
                 var prev = RenderTexture.active;
@@ -228,15 +236,22 @@ public class PropsDetector : MonoBehaviour
                 RenderTexture.active = prev;
             }
 
-            // Parse detections for this camera
-            combinedDetections.AddRange(ParseDetectionsProps(worker, cam));
+            // Parse detections for this camera and cache
+            var dets = ParseDetectionsProps(worker, cam);
+            _camCache[i] = dets;
+            _camCacheTime[i] = Time.time;
         }
 
+        // Build union from recent caches
+        var combinedDetections = new List<DetectionInfo>(32);
+        for (int k = 0; k < visionCameras.Length; k++)
+            if (Time.time - _camCacheTime[k] <= cacheTTL)
+                combinedDetections.AddRange(_camCache[k]);
+
         latestDetections = combinedDetections;
-        OnDetections?.Invoke(latestDetections);
+        OnDetections?.Invoke(latestDetections);   // always publish, even if empty
 
-
-        // Compact count summary every N frames
+        // Optional periodic summary
         if (printEveryNFrames > 0 && Time.frameCount % printEveryNFrames == 0)
         {
             var counts = latestDetections.GroupBy(d => d.label)
@@ -266,12 +281,12 @@ public class PropsDetector : MonoBehaviour
 
         for (int i = 0; i < numBoxes; i++)
         {
-            // --- box ---
+            // box
             float bx, by, bw, bh;
             if (channelsFirst) { bx = cpu[0, 0, i]; by = cpu[0, 1, i]; bw = cpu[0, 2, i]; bh = cpu[0, 3, i]; }
             else { bx = cpu[0, i, 0]; by = cpu[0, i, 1]; bw = cpu[0, i, 2]; bh = cpu[0, i, 3]; }
 
-            // --- best class ---
+            // best class
             int bestClass = -1; float bestScore = 0f;
             for (int c = 4; c < numAttrs; c++)
             {
@@ -293,7 +308,7 @@ public class PropsDetector : MonoBehaviour
             candidates.Add((bestClass, conf, bx, by, bw, bh));
         }
 
-        // Keep top-K candidates to avoid overload before screen mapping / raycasts
+        // Keep top-K candidates before raycasts
         int TOPK = 300;
         if (maxDetectionsPerCamera > 0) TOPK = Mathf.Min(TOPK, Mathf.Max(1, maxDetectionsPerCamera * 10));
         if (candidates.Count > TOPK)
@@ -302,14 +317,13 @@ public class PropsDetector : MonoBehaviour
         int raycastsDone = 0;
         int raycastCap = (maxDetectionsPerCamera > 0) ? maxDetectionsPerCamera : int.MaxValue;
 
-        // Convert to screen space + (optional) raycast
         foreach (var c in candidates)
         {
             if (raycastsDone >= raycastCap) break;
 
             string label = cocoLabels[c.cls];
 
-            // model (pixels) -> camera (pixels)
+            // model(px) -> camera(px)
             float px = (c.cx - c.w * 0.5f) / inputWidth * cam.pixelWidth;
             float py = (c.cy - c.h * 0.5f) / inputHeight * cam.pixelHeight;
             float pw = c.w / inputWidth * cam.pixelWidth;
@@ -345,7 +359,6 @@ public class PropsDetector : MonoBehaviour
 
         var kept = ApplyNMS(detections, 0.45f);
 
-        // --- Debug rays for kept boxes (clean & capped) ---
 #if UNITY_EDITOR
         if (drawRays && drawAfterNMS)
         {
@@ -372,7 +385,7 @@ public class PropsDetector : MonoBehaviour
 
                 if (hitOk)
                 {
-                    Debug.DrawLine(hit.point + Vector3.up * 0.05f, hit.point - Vector3.up * 0.05f, hitMarkerColor, rayDuration);
+                    Debug.DrawLine(hit.point + Vector3.up * 0.05f,    hit.point - Vector3.up * 0.05f,    hitMarkerColor, rayDuration);
                     Debug.DrawLine(hit.point + Vector3.right * 0.05f, hit.point - Vector3.right * 0.05f, hitMarkerColor, rayDuration);
                     Debug.DrawLine(hit.point + Vector3.forward * 0.05f, hit.point - Vector3.forward * 0.05f, hitMarkerColor, rayDuration);
                 }
@@ -385,8 +398,7 @@ public class PropsDetector : MonoBehaviour
         return kept;
     }
 
-    // === Helpers matching your style ===
-
+    // === Helpers ===
     private float IoU(Rect a, Rect b)
     {
         float interX = Mathf.Max(a.xMin, b.xMin);
