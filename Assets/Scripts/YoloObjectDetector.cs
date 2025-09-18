@@ -1,8 +1,10 @@
-using UnityEngine;
-using Unity.Sentis;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
+using Unity.Sentis;
+using UnityEngine;
+using Debug = UnityEngine.Debug;
 
 /// <summary>
 /// Holds YOLO detection info
@@ -21,6 +23,24 @@ public struct DetectionInfo
 
 public class YoloObjectDetector : MonoBehaviour
 {
+    [Header("Performance")]
+    [Tooltip("Max inferences per second for THIS detector (across its cameras).")]
+    public float targetInferenceFPS = 10f;
+
+    [Tooltip("Spread cameras over frames to avoid spikes.")]
+    public bool staggerCameras = true;
+
+    [Tooltip("Limit post-NMS results per camera to reduce raycasts and color sampling.")]
+    public int maxDetectionsPerCamera = 5;
+
+    [Tooltip("Compute color names from pixels (heavy). Turn OFF unless you need it right now).")]
+    public bool enableColourSampling = false;
+
+    [Header("Debug")]
+    public bool showDebugLines = false;     // OFF by default
+    public bool logDetections = false;      // OFF by default
+    [Range(0f, 5f)] public float debugLineDuration = 0f; // 0 = draw for one frame
+
     [Header("Model & Vision")]
     public ModelAsset modelAsset;
     public Camera[] visionCameras;             // Multiple cameras supported
@@ -34,6 +54,15 @@ public class YoloObjectDetector : MonoBehaviour
 
     private Worker worker;
     private Model model;
+
+    // (Optional) reusable transform for TextureConverter
+    private readonly TextureTransform _texTransform = new TextureTransform();
+
+    // Throttle / stagger timing
+    private float _nextTick = 0f;
+    private int _frameCounter = 0;
+
+    // Only used if enableColourSampling == true
     private Texture2D readTex;
 
     public event Action<List<DetectionInfo>> OnDetections;
@@ -49,7 +78,7 @@ public class YoloObjectDetector : MonoBehaviour
         "Lamborghini Gallardo 2010",
         "Porsche 911 Turbo S 2021",
         "Mercedes AMG GT 2019",
-        "Lamborghini Aventador SVJ"
+        "Tesla Cybertruck"
     };
 
     private List<DetectionInfo> latestDetections = new();
@@ -68,13 +97,23 @@ public class YoloObjectDetector : MonoBehaviour
 
             if (!visionRTs[i])
             {
-                var rt = new RenderTexture(inputWidth, inputHeight, 24, RenderTextureFormat.ARGB32);
-                rt.name = $"VisionRT_{i}";
+                var rt = new RenderTexture(inputWidth, inputHeight, 24, RenderTextureFormat.ARGB32)
+                {
+                    name = $"VisionRT_{i}",
+                    useMipMap = false,
+                    antiAliasing = 1
+                };
                 rt.Create();
                 visionRTs[i] = rt;
             }
 
             cam.targetTexture = visionRTs[i];   // bind permanently
+            // Camera-side perf tweaks
+            cam.allowHDR = false;
+            cam.allowMSAA = false;
+            cam.clearFlags = CameraClearFlags.SolidColor;
+            cam.backgroundColor = Color.black;
+            // Consider culling masks to include only needed layers
         }
     }
 
@@ -82,7 +121,10 @@ public class YoloObjectDetector : MonoBehaviour
     {
         model = ModelLoader.Load(modelAsset);
         worker = new Worker(model, BackendType.GPUCompute);
-        readTex = new Texture2D(inputWidth, inputHeight, TextureFormat.RGB24, false);
+
+        // Only allocate CPU texture if color sampling will be used
+        if (enableColourSampling)
+            readTex = new Texture2D(inputWidth, inputHeight, TextureFormat.RGB24, false);
 
         UnityEngine.Debug.Log($"YoloObjectDetector initialized with {visionCameras.Length} cameras.");
     }
@@ -91,40 +133,60 @@ public class YoloObjectDetector : MonoBehaviour
     {
         if (visionCameras == null || visionCameras.Length == 0) return;
 
-        List<DetectionInfo> combinedDetections = new();
+        // Throttle overall detector rate
+        if (Time.time < _nextTick) return;
+        _nextTick = Time.time + 1f / Mathf.Max(1f, targetInferenceFPS);
 
-        for (int i = 0; i < visionCameras.Length; i++)
+        var combinedDetections = new List<DetectionInfo>(16);
+
+        // Stagger: process one camera per tick to avoid spikes
+        int startIndex = 0;
+        int camerasThisTick = visionCameras.Length;
+        if (staggerCameras && visionCameras.Length > 1)
         {
+            startIndex = _frameCounter++ % visionCameras.Length;
+            camerasThisTick = 1;
+        }
+
+        for (int j = 0; j < camerasThisTick; j++)
+        {
+            int i = (startIndex + j) % visionCameras.Length;
+
             Camera cam = visionCameras[i];
             RenderTexture rt = (visionRTs != null && i < visionRTs.Length) ? visionRTs[i] : null;
             if (!cam || !rt) continue;
 
-            // If the cameras are not auto-rendering, you can force-render:
-            // cam.Render();
-
-            // Read pixels from the persistent RT
-            var prev = RenderTexture.active;
-            RenderTexture.active = rt;
-            readTex.ReadPixels(new Rect(0, 0, rt.width, rt.height), 0, 0);
-            readTex.Apply();
-            RenderTexture.active = prev;
-
+            // Create a short-lived input tensor (Sentis pattern: Schedule + Dispose)
             var input = new Tensor<float>(new TensorShape(1, 3, inputHeight, inputWidth));
-            TextureConverter.ToTensor(readTex, input, new TextureTransform());
+            TextureConverter.ToTensor(rt, input, _texTransform);
             worker.Schedule(input);
             input.Dispose();
 
+            // If (and only if) we need color sampling, refresh readTex once for this camera
+            if (enableColourSampling && readTex != null)
+            {
+                var prev = RenderTexture.active;
+                RenderTexture.active = rt;
+                readTex.ReadPixels(new Rect(0, 0, rt.width, rt.height), 0, 0);
+                readTex.Apply();
+                RenderTexture.active = prev;
+            }
+
             // Parse detections for this camera
             List<DetectionInfo> detections = ParseDetections(worker, cam);
+
+            // Keep only the top-K (post-NMS) to reduce downstream work
+            if (maxDetectionsPerCamera > 0)
+                detections = detections
+                    .OrderByDescending(d => d.confidence)
+                    .Take(maxDetectionsPerCamera)
+                    .ToList();
+
             combinedDetections.AddRange(detections);
         }
 
         latestDetections = combinedDetections;
-
-        if (latestDetections.Count > 0)
-        {
-            OnDetections?.Invoke(latestDetections);
-        }
+        OnDetections?.Invoke(latestDetections);
     }
 
     // IoU (Intersection over Union) helper
@@ -167,66 +229,89 @@ public class YoloObjectDetector : MonoBehaviour
 
     private List<DetectionInfo> ParseDetections(Worker worker, Camera cam)
     {
-        List<DetectionInfo> detections = new();
+        int raycastsDone = 0;
+        int raycastCap = (maxDetectionsPerCamera > 0) ? maxDetectionsPerCamera : int.MaxValue;
+
+        var detections = new List<DetectionInfo>(16);
 
         var output = worker.PeekOutput() as Tensor<float>;
         if (output == null) return detections;
 
-        using var cpuOutput = output.ReadbackAndClone();
+        using var cpu = output.ReadbackAndClone();
 
-        int numAttrs = cpuOutput.shape[1];   // 14
-        int numBoxes = cpuOutput.shape[2];   // 8400
+        // Support both layouts:
+        //  - channels-first: [1, A, B]  (A=numAttrs, B=numBoxes)
+        //  - channels-last : [1, B, A]
+        int A = cpu.shape[1];
+        int B = cpu.shape[2];
+        bool channelsFirst = (A <= B);     // e.g., 15 vs 8400
+        int numBoxes = channelsFirst ? B : A;
+        int numAttrs = channelsFirst ? A : B;
+
+        // Our car model may be 4 box + [obj?] + numClasses (10)
+        // hasObjness if numAttrs == 5 + classes; else assume 4 + classes
+        int classes = carLabels.Length;
+        bool hasObj = (numAttrs == (5 + classes));
+        int clsStart = hasObj ? 5 : 4;
 
         for (int i = 0; i < numBoxes; i++)
         {
-            float cx = cpuOutput[0, 0, i];
-            float cy = cpuOutput[0, 1, i];
-            float w = cpuOutput[0, 2, i];
-            float h = cpuOutput[0, 3, i];
+            float cx, cy, w, h, obj = 1f;
 
-            // apply sigmoid to objectness
-            float obj = Sigmoid(cpuOutput[0, 4, i]);
-
-            // find best class
-            int bestClass = -1;
-            float bestScore = 0f;
-            for (int c = 5; c < numAttrs; c++)
+            if (channelsFirst)
             {
-                float score = Sigmoid(cpuOutput[0, c, i]);
-                if (score > bestScore)
-                {
-                    bestScore = score;
-                    bestClass = c - 5;
-                }
+                cx = cpu[0, 0, i];
+                cy = cpu[0, 1, i];
+                w = cpu[0, 2, i];
+                h = cpu[0, 3, i];
+                if (hasObj) obj = Sigmoid(cpu[0, 4, i]);
+            }
+            else
+            {
+                cx = cpu[0, i, 0];
+                cy = cpu[0, i, 1];
+                w = cpu[0, i, 2];
+                h = cpu[0, i, 3];
+                if (hasObj) obj = Sigmoid(cpu[0, i, 4]);
             }
 
-            // final confidence
-            float confidence = obj * bestScore;
-            confidence = Mathf.Sqrt(confidence);
-            if (confidence < confidenceThreshold) continue;
+            // Best class
+            int bestClass = -1; float bestScore = 0f;
+            for (int c = clsStart; c < numAttrs; c++)
+            {
+                float s = channelsFirst ? cpu[0, c, i] : cpu[0, i, c];
+                s = Sigmoid(s);
+                if (s > bestScore) { bestScore = s; bestClass = c - clsStart; }
+            }
 
-            if (bestClass < 0 || bestClass >= carLabels.Length) continue;
+            float confidence = hasObj ? Mathf.Sqrt(obj * bestScore) : bestScore;
+            if (confidence < confidenceThreshold) continue;
+            if (bestClass < 0 || bestClass >= classes) continue;
 
             string label = carLabels[bestClass];
 
-            // scale bbox to pixel space
-            float x = (cx - w / 2f) / inputWidth * cam.pixelWidth;
-            float y = (cy - h / 2f) / inputHeight * cam.pixelHeight;
+            // Scale bbox to camera pixel space
+            float x = (cx - w * 0.5f) / inputWidth * cam.pixelWidth;
+            float y = (cy - h * 0.5f) / inputHeight * cam.pixelHeight;
             float bw = w / inputWidth * cam.pixelWidth;
             float bh = h / inputHeight * cam.pixelHeight;
 
             Rect bbox = new Rect(x, y, bw, bh);
 
-            // raycast from bbox center
-            Vector3 screenPoint = new Vector3(x + bw / 2f, y + bh / 2f, cam.nearClipPlane + 1f);
+            if (raycastsDone >= raycastCap) continue;
+
+            // Raycast from bbox center
+            Vector3 screenPoint = new Vector3(x + bw * 0.5f, y + bh * 0.5f, 0f);
             Ray ray = cam.ScreenPointToRay(screenPoint);
             if (Physics.Raycast(ray, out RaycastHit hit))
             {
+                raycastsDone++;
+
                 var det = new DetectionInfo
                 {
                     label = label,
                     bbox = bbox,
-                    colour = SampleColour(bbox, cam),
+                    colour = enableColourSampling ? SampleColour(bbox, cam) : "gray",
                     worldPos = hit.point,
                     distance = hit.distance,
                     relDir = GetRelativeDirection(cam, hit.point),
@@ -236,20 +321,14 @@ public class YoloObjectDetector : MonoBehaviour
 
                 detections.Add(det);
 
-                UnityEngine.Debug.Log($"[YOLO] Detected {det.label} conf={det.confidence:F2} color={det.colour} at {det.worldPos}");
-
-                // Debug visualization
-                Vector3 debugPos = det.worldPos + Vector3.up * 2f;
-                Color debugCol = Color.gray;
-                if (ColorUtility.TryParseHtmlString(det.colour, out Color parsed))
-                    debugCol = parsed;
-
-                UnityEngine.Debug.DrawLine(det.worldPos, debugPos, debugCol, 2f);
+                if (logDetections)
+                    Debug.Log($"[YOLO-cars] {det.label} {det.confidence:0.00} @ {det.worldPos}");
             }
         }
 
         return ApplyNMS(detections, 0.6f);
     }
+
 
     // sigmoid helper
     private float Sigmoid(float x)
@@ -259,17 +338,21 @@ public class YoloObjectDetector : MonoBehaviour
 
     private string SampleColour(Rect bbox, Camera cam)
     {
+        // Only called when enableColourSampling == true.
+        // We refresh readTex once per camera per tick in Update().
+        if (readTex == null) return "gray";
+
         // Clamp bbox inside texture
         int x = Mathf.Clamp((int)bbox.x, 0, readTex.width - 1);
         int y = Mathf.Clamp((int)bbox.y, 0, readTex.height - 1);
         int w = Mathf.Clamp((int)bbox.width, 1, readTex.width - x);
         int h = Mathf.Clamp((int)bbox.height, 1, readTex.height - y);
 
-        // Focus on the central/top region of the car (hood/roof area)
-        int cropX = x + w / 4;                // middle section
+        // Focus on central/top region
+        int cropX = x + w / 4;
         int cropW = w / 2;
-        int cropY = y + h / 4;                // ignore bottom (floor/reflections)
-        int cropH = h / 3;                    // only take ~⅓ height
+        int cropY = y + h / 4;
+        int cropH = h / 3;
 
         Color[] pixels = readTex.GetPixels(cropX, cropY, cropW, cropH);
         if (pixels.Length == 0) return "unknown";
@@ -281,7 +364,7 @@ public class YoloObjectDetector : MonoBehaviour
         {
             Color.RGBToHSV(c, out float hue, out float sat, out float val);
 
-            // Filter out dull or extreme pixels (background, glass, shadows, bright reflections)
+            // Filter out dull or extreme pixels
             if (sat < 0.25f) continue;
             if (val < 0.25f || val > 0.9f) continue;
 

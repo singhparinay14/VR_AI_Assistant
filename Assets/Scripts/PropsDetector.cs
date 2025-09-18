@@ -8,10 +8,20 @@ using UnityEngine.Experimental.Rendering; // GraphicsFormat
 
 public class PropsDetector : MonoBehaviour
 {
+    [Header("Performance")]
+    [Tooltip("Max inferences per second for THIS detector (across its cameras).")]
+    public float targetInferenceFPS = 10f;
+    [Tooltip("Spread cameras across ticks to avoid spikes.")]
+    public bool staggerCameras = true;
+    [Tooltip("After filtering, cap detections per camera to reduce raycasts. 0 = unlimited.")]
+    public int maxDetectionsPerCamera = 5;
+    [Tooltip("Compute color from pixels (heavy). Turn OFF unless needed.")]
+    public bool enableColourSampling = false;
+
     [Header("Debug Viz")]
     public bool drawRays = true;
     public bool drawAfterNMS = true;     // draw rays only for final kept boxes
-    public int maxRaysDrawn = 20;       // cap per frame
+    public int maxRaysDrawn = 20;        // cap per frame
     public float rayDuration = 0.15f;
     public Color rayHitColor = Color.green;
     public Color rayMissColor = Color.red;
@@ -46,14 +56,20 @@ public class PropsDetector : MonoBehaviour
 
     [Header("Logging")]
     public bool verbose = false;             // per-detection logs
-    public int printEveryNFrames = 10;      // counts summary cadence
+    public int printEveryNFrames = 10;       // counts summary cadence
 
     private Worker worker;
     private Model model;
+
+    // Only used if enableColourSampling == true
     private Texture2D readTex;
 
     // Runtime labels actually used everywhere in this script
     private string[] cocoLabels;
+
+    // Throttle / stagger timing
+    private float _nextTick = 0f;
+    private int _frameCounter = 0;
 
     public bool HasLabel(string word)
     {
@@ -63,8 +79,6 @@ public class PropsDetector : MonoBehaviour
         return cocoLabels.Any(l => l.ToLower().Contains(w));
     }
 
-
-
     public event Action<List<DetectionInfo>> OnDetections;
 
     // COCO-80 labels (Ultralytics order)
@@ -73,18 +87,15 @@ public class PropsDetector : MonoBehaviour
 
     // Built-in fallback (Ultralytics COCO-80 order)
     private static readonly string[] CocoLabelsFallback = new string[] {
-    "person","bicycle","car","motorcycle","airplane","bus","train","truck","boat","traffic light",
-    "fire hydrant","stop sign","parking meter","bench","bird","cat","dog","horse","sheep","cow",
-    "elephant","bear","zebra","giraffe","backpack","umbrella","handbag","tie","suitcase","frisbee",
-    "skis","snowboard","sports ball","kite","baseball bat","baseball glove","skateboard","surfboard","tennis racket","bottle",
-    "wine glass","cup","fork","knife","spoon","bowl","banana","apple","sandwich","orange",
-    "broccoli","carrot","hot dog","pizza","donut","cake","chair","couch","potted plant","bed",
-    "dining table","toilet","tv","laptop","mouse","remote","keyboard","cell phone","microwave","oven",
-    "toaster","sink","refrigerator","book","clock","vase","scissors","teddy bear","hair drier","toothbrush"
-};
-
-
-
+        "person","bicycle","car","motorcycle","airplane","bus","train","truck","boat","traffic light",
+        "fire hydrant","stop sign","parking meter","bench","bird","cat","dog","horse","sheep","cow",
+        "elephant","bear","zebra","giraffe","backpack","umbrella","handbag","tie","suitcase","frisbee",
+        "skis","snowboard","sports ball","kite","baseball bat","baseball glove","skateboard","surfboard","tennis racket","bottle",
+        "wine glass","cup","fork","knife","spoon","bowl","banana","apple","sandwich","orange",
+        "broccoli","carrot","hot dog","pizza","donut","cake","chair","couch","potted plant","bed",
+        "dining table","toilet","tv","laptop","mouse","remote","keyboard","cell phone","microwave","oven",
+        "toaster","sink","refrigerator","book","clock","vase","scissors","teddy bear","hair drier","toothbrush"
+    };
 
     private HashSet<int> allowSet;           // resolved class indices
     private List<DetectionInfo> latestDetections = new();
@@ -118,6 +129,11 @@ public class PropsDetector : MonoBehaviour
                 visionRTs[i] = rt;
             }
             cam.targetTexture = visionRTs[i]; // bind permanently
+            // Camera perf hints
+            cam.allowHDR = false;
+            cam.allowMSAA = false;
+            cam.clearFlags = CameraClearFlags.SolidColor;
+            cam.backgroundColor = Color.black;
         }
     }
 
@@ -138,15 +154,8 @@ public class PropsDetector : MonoBehaviour
                 .Where(s => !string.IsNullOrEmpty(s))
                 .ToArray();
 
-            if (parsed.Length == 80)
-            {
-                cocoLabels = parsed;
-            }
-            else
-            {
-                Debug.LogWarning($"PropsDetector: labels file has {parsed.Length} entries, expected 80. Using built-in fallback.");
-                cocoLabels = CocoLabelsFallback;
-            }
+            if (parsed.Length == 80) cocoLabels = parsed;
+            else { Debug.LogWarning($"PropsDetector: labels file has {parsed.Length} entries, expected 80. Using built-in fallback."); cocoLabels = CocoLabelsFallback; }
         }
         else
         {
@@ -161,10 +170,12 @@ public class PropsDetector : MonoBehaviour
                              .Where(idx => idx >= 0)
               );
 
-
         model = ModelLoader.Load(modelAsset);
         worker = new Worker(model, BackendType.GPUCompute);
-        readTex = new Texture2D(inputWidth, inputHeight, TextureFormat.RGB24, false);
+
+        // Only allocate CPU texture if we actually sample color
+        if (enableColourSampling)
+            readTex = new Texture2D(inputWidth, inputHeight, TextureFormat.RGB24, false);
 
         Debug.Log($"PropsDetector initialized with {visionCameras.Length} camera(s).");
     }
@@ -173,10 +184,24 @@ public class PropsDetector : MonoBehaviour
     {
         if (visionCameras == null || visionCameras.Length == 0) return;
 
+        // Throttle overall detector rate
+        if (Time.time < _nextTick) return;
+        _nextTick = Time.time + 1f / Mathf.Max(1f, targetInferenceFPS);
+
         List<DetectionInfo> combinedDetections = new();
 
-        for (int i = 0; i < visionCameras.Length; i++)
+        // Stagger: process one camera per tick to avoid spikes
+        int startIndex = 0;
+        int camerasThisTick = visionCameras.Length;
+        if (staggerCameras && visionCameras.Length > 1)
         {
+            startIndex = _frameCounter++ % visionCameras.Length;
+            camerasThisTick = 1;
+        }
+
+        for (int j = 0; j < camerasThisTick; j++)
+        {
+            int i = (startIndex + j) % visionCameras.Length;
             Camera cam = visionCameras[i];
             RenderTexture rt = (visionRTs != null && i < visionRTs.Length) ? visionRTs[i] : null;
             if (!cam || !rt) continue;
@@ -187,35 +212,35 @@ public class PropsDetector : MonoBehaviour
                 continue;
             }
 
-            // Read pixels from RT
-            var prev = RenderTexture.active;
-            RenderTexture.active = rt;
-            readTex.ReadPixels(new Rect(0, 0, rt.width, rt.height), 0, 0);
-            readTex.Apply();
-            RenderTexture.active = prev;
-
-            // Build input tensor and run
+            // Feed RT directly into tensor (no CPU ReadPixels here)
             var input = new Tensor<float>(new TensorShape(1, 3, inputHeight, inputWidth));
-            TextureConverter.ToTensor(readTex, input, new TextureTransform()); // matches your car detector
+            TextureConverter.ToTensor(rt, input, new TextureTransform());
             worker.Schedule(input);
             input.Dispose();
+
+            // If we need colour sampling, refresh readTex once per camera this tick
+            if (enableColourSampling && readTex != null)
+            {
+                var prev = RenderTexture.active;
+                RenderTexture.active = rt;
+                readTex.ReadPixels(new Rect(0, 0, rt.width, rt.height), 0, 0);
+                readTex.Apply();
+                RenderTexture.active = prev;
+            }
 
             // Parse detections for this camera
             combinedDetections.AddRange(ParseDetectionsProps(worker, cam));
         }
 
         latestDetections = combinedDetections;
+        OnDetections?.Invoke(latestDetections);
 
-        if (latestDetections.Count > 0)
-            OnDetections?.Invoke(latestDetections);
 
         // Compact count summary every N frames
-        if (Time.frameCount % Mathf.Max(1, printEveryNFrames) == 0)
+        if (printEveryNFrames > 0 && Time.frameCount % printEveryNFrames == 0)
         {
-            var counts = latestDetections
-                .GroupBy(d => d.label)
-                .Select(g => $"{g.Key}:{g.Count()}")
-                .ToArray();
+            var counts = latestDetections.GroupBy(d => d.label)
+                .Select(g => $"{g.Key}:{g.Count()}").ToArray();
             Debug.Log(counts.Length == 0 ? "[YOLO-props] none" : "[YOLO-props] " + string.Join(", ", counts));
         }
     }
@@ -268,14 +293,20 @@ public class PropsDetector : MonoBehaviour
             candidates.Add((bestClass, conf, bx, by, bw, bh));
         }
 
-        // Keep top-K to avoid NMS overload
-        const int TOPK = 300;
+        // Keep top-K candidates to avoid overload before screen mapping / raycasts
+        int TOPK = 300;
+        if (maxDetectionsPerCamera > 0) TOPK = Mathf.Min(TOPK, Mathf.Max(1, maxDetectionsPerCamera * 10));
         if (candidates.Count > TOPK)
             candidates = candidates.OrderByDescending(c => c.conf).Take(TOPK).ToList();
+
+        int raycastsDone = 0;
+        int raycastCap = (maxDetectionsPerCamera > 0) ? maxDetectionsPerCamera : int.MaxValue;
 
         // Convert to screen space + (optional) raycast
         foreach (var c in candidates)
         {
+            if (raycastsDone >= raycastCap) break;
+
             string label = cocoLabels[c.cls];
 
             // model (pixels) -> camera (pixels)
@@ -293,12 +324,13 @@ public class PropsDetector : MonoBehaviour
             Ray ray = cam.ViewportPointToRay(new Vector3(vx, vy, 0f));
             float castLen = GetCastLength(cam);
             bool hitOk = Physics.Raycast(ray, out RaycastHit hit, castLen, hitMask);
+            raycastsDone++;
 
             var det = new DetectionInfo
             {
                 label = label,
                 bbox = bbox,
-                colour = SampleColour(bbox),
+                colour = enableColourSampling && readTex != null ? SampleColour(bbox) : "gray",
                 worldPos = hitOk ? hit.point : cam.transform.position + cam.transform.forward * 2f,
                 distance = hitOk ? hit.distance : -1f,
                 relDir = GetRelativeDirection(cam, hitOk ? hit.point : cam.transform.position + cam.transform.forward * 2f),
@@ -314,6 +346,7 @@ public class PropsDetector : MonoBehaviour
         var kept = ApplyNMS(detections, 0.45f);
 
         // --- Debug rays for kept boxes (clean & capped) ---
+#if UNITY_EDITOR
         if (drawRays && drawAfterNMS)
         {
             int drawn = 0;
@@ -347,6 +380,7 @@ public class PropsDetector : MonoBehaviour
                 drawn++;
             }
         }
+#endif
 
         return kept;
     }
