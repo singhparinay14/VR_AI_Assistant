@@ -10242,9 +10242,13 @@ MonoBehaviour:
   logDetections: 0
   debugLineDuration: 0
   drawRays: 0
+  drawAfterNMS: 1
+  maxRaysDrawn: 20
   rayDuration: 0.15
   rayHitColor: {r: 0, g: 1, b: 0, a: 1}
+  rayMissColor: {r: 1, g: 0, b: 0, a: 1}
   hitMarkerColor: {r: 1, g: 0.92156863, b: 0.015686275, a: 1}
+  invertYForRay: 1
   hitMask:
     serializedVersion: 2
     m_Bits: 4294967295
@@ -10255,6 +10259,7 @@ MonoBehaviour:
   inputWidth: 640
   inputHeight: 640
   confidenceThreshold: 0.253
+  cacheTTL: 0.6
   visionRTs: []
 --- !u!4 &1216347088
 Transform:
@@ -13431,7 +13436,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   targetInferenceFPS: 10
-  staggerCameras: 0
+  staggerCameras: 1
   maxDetectionsPerCamera: 10
   enableColourSampling: 0
   drawRays: 0
@@ -13455,6 +13460,7 @@ MonoBehaviour:
   inputWidth: 640
   inputHeight: 640
   confidenceThreshold: 0.25
+  cacheTTL: 0.6
   visionRTs: []
   allowedLabels:
   - bench
@@ -13502,16 +13508,20 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   targetInferenceFPS: 10
-  staggerCameras: 0
+  staggerCameras: 1
   maxDetectionsPerCamera: 10
   enableColourSampling: 0
   showDebugLines: 0
   logDetections: 0
   debugLineDuration: 0
   drawRays: 0
+  drawAfterNMS: 1
+  maxRaysDrawn: 20
   rayDuration: 0.15
   rayHitColor: {r: 0, g: 1, b: 0, a: 1}
+  rayMissColor: {r: 1, g: 0, b: 0, a: 1}
   hitMarkerColor: {r: 1, g: 0.92156863, b: 0.015686275, a: 1}
+  invertYForRay: 1
   hitMask:
     serializedVersion: 2
     m_Bits: 4294967295
@@ -13524,6 +13534,7 @@ MonoBehaviour:
   inputWidth: 640
   inputHeight: 640
   confidenceThreshold: 0.352
+  cacheTTL: 0.6
   visionRTs: []
 --- !u!4 &1563781114
 Transform:
@@ -13772,6 +13783,9 @@ MonoBehaviour:
   approachOffset: 1
   lastGuidedLabel: 
   navDebugLogs: 1
+  gridSizeMeters: 1.5
+  preferObjectDescriptorId: 1
+  ttlSeconds: 1.5
   autoFindPropDetectors: 1
   navTrigger: 0
 --- !u!4 &1574782569
