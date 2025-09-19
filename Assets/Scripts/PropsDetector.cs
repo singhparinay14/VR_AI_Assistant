@@ -263,6 +263,13 @@ public class PropsDetector : MonoBehaviour
     private float GetCastLength(Camera cam)
         => useCameraRangeForRays ? Mathf.Max(0.1f, cam.farClipPlane - cam.nearClipPlane) : rayLength;
 
+    private static bool IsLikelyFloorOrWall(RaycastHit hit)
+    {
+        if (hit.collider == null) return true;
+        var b = hit.collider.bounds;
+        return (b.size.y < 0.05f) || (b.size.x > 50f) || (b.size.z > 50f);
+    }
+
     private List<DetectionInfo> ParseDetectionsProps(Worker worker, Camera cam)
     {
         List<DetectionInfo> detections = new();
@@ -337,10 +344,35 @@ public class PropsDetector : MonoBehaviour
 
             Ray ray = cam.ViewportPointToRay(new Vector3(vx, vy, 0f));
             float castLen = GetCastLength(cam);
-            bool hitOk = Physics.Raycast(ray, out RaycastHit hit, castLen, hitMask);
+            bool hitOk = Physics.Raycast(ray, out RaycastHit hit, castLen, hitMask, QueryTriggerInteraction.Collide);
             raycastsDone++;
 
-            // ✅ FIX: declare root & surfaceName BEFORE the initializer
+            // Robust fallback (avoid floors/walls; try spherecast and side rays)
+            float vw = pw / cam.pixelWidth;
+            if ((!hitOk || IsLikelyFloorOrWall(hit)) && vw > 0.02f)
+            {
+                const float radius = 0.15f;
+                if (Physics.SphereCast(ray, radius, out RaycastHit sh, castLen, hitMask, QueryTriggerInteraction.Collide) && !IsLikelyFloorOrWall(sh))
+                {
+                    hit = sh;
+                    hitOk = true;
+                }
+                else
+                {
+                    float vxL = Mathf.Clamp01(vx - vw * 0.25f);
+                    float vxR = Mathf.Clamp01(vx + vw * 0.25f);
+                    Ray rL = cam.ViewportPointToRay(new Vector3(vxL, vy, 0f));
+                    Ray rR = cam.ViewportPointToRay(new Vector3(vxR, vy, 0f));
+
+                    bool okL = Physics.Raycast(rL, out RaycastHit hL, castLen, hitMask, QueryTriggerInteraction.Collide) && !IsLikelyFloorOrWall(hL);
+                    bool okR = Physics.Raycast(rR, out RaycastHit hR, castLen, hitMask, QueryTriggerInteraction.Collide) && !IsLikelyFloorOrWall(hR);
+
+                    if (okL && (!hitOk || hL.distance < hit.distance)) { ray = rL; hit = hL; hitOk = true; }
+                    if (okR && (!hitOk || hR.distance < hit.distance)) { ray = rR; hit = hR; hitOk = true; }
+                }
+            }
+
+            // ✅ Use root to stabilize surface identity
             Transform root = hitOk ? hit.collider.transform.root : null;
             string surfaceName = hitOk ? (root != null ? root.name : hit.collider.name) : "nohit";
 
@@ -358,7 +390,7 @@ public class PropsDetector : MonoBehaviour
             detections.Add(det);
 
             if (verbose)
-                Debug.Log($"[YOLO-props] {det.label} conf={det.confidence:0.00} box=({(int)bbox.x},{(int)bbox.y},{(int)bbox.width},{(int)bbox.height}) hit={hitOk}");
+                Debug.Log($"[YOLO-props] {det.label} conf={det.confidence:0.00} hit={(hitOk ? "OK" : "MISS")} surf={det.surface}");
         }
 
         var kept = ApplyNMS(detections, 0.45f);
@@ -382,16 +414,16 @@ public class PropsDetector : MonoBehaviour
 
                 Ray ray = cam.ViewportPointToRay(new Vector3(vx, vy, 0f));
                 float castLen = GetCastLength(cam);
-                bool hitOk = Physics.Raycast(ray, out RaycastHit hit, castLen, hitMask);
+                bool hitOk = d.distance >= 0f;
 
-                Debug.DrawRay(ray.origin, ray.direction * (hitOk ? hit.distance : castLen),
+                Debug.DrawRay(ray.origin, ray.direction * (hitOk ? d.distance : castLen),
                               hitOk ? rayHitColor : rayMissColor, rayDuration);
 
                 if (hitOk)
                 {
-                    Debug.DrawLine(hit.point + Vector3.up * 0.05f,    hit.point - Vector3.up * 0.05f,    hitMarkerColor, rayDuration);
-                    Debug.DrawLine(hit.point + Vector3.right * 0.05f, hit.point - Vector3.right * 0.05f, hitMarkerColor, rayDuration);
-                    Debug.DrawLine(hit.point + Vector3.forward * 0.05f, hit.point - Vector3.forward * 0.05f, hitMarkerColor, rayDuration);
+                    Debug.DrawLine(d.worldPos + Vector3.up * 0.05f,    d.worldPos - Vector3.up * 0.05f,    hitMarkerColor, rayDuration);
+                    Debug.DrawLine(d.worldPos + Vector3.right * 0.05f, d.worldPos - Vector3.right * 0.05f, hitMarkerColor, rayDuration);
+                    Debug.DrawLine(d.worldPos + Vector3.forward * 0.05f, d.worldPos - Vector3.forward * 0.05f, hitMarkerColor, rayDuration);
                 }
 
                 drawn++;

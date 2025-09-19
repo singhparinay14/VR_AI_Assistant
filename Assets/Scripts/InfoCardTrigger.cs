@@ -1,38 +1,50 @@
 using UnityEngine;
-using TMPro; // needed for TextMeshPro
+using UnityEngine.InputSystem; // NEW
 
 public class InfoCardTrigger : MonoBehaviour
 {
     [Header("References")]
-    public GameObject infoCard;     // assign the prefab instance
-    public AudioSource audioSource; // narration audio
+    public GameObject infoCard;
+    public AudioSource audioSource;
 
     [Header("Car Info")]
     public string carName;
     public string modelYear;
     public string brandName;
 
+    [Header("XR Input")]
+    public InputActionProperty playAction; // assign "XR Controller → RightHand → PrimaryButton"
+
+    private bool playerInside = false;
+
     private void Start()
     {
         if (infoCard != null)
         {
             infoCard.SetActive(false);
-
-            // Auto-fill text fields
-            TextMeshProUGUI[] texts = infoCard.GetComponentsInChildren<TextMeshProUGUI>();
-            foreach (var t in texts)
+            foreach (var t in infoCard.GetComponentsInChildren<TMPro.TextMeshProUGUI>())
             {
                 if (t.name == "CarNameText") t.text = carName;
                 if (t.name == "ModelYearText") t.text = modelYear;
                 if (t.name == "BrandNameText") t.text = brandName;
             }
         }
+
+        if (playAction.reference != null)
+            playAction.action.performed += OnPlayAction;
+    }
+
+    private void OnDestroy()
+    {
+        if (playAction.reference != null)
+            playAction.action.performed -= OnPlayAction;
     }
 
     private void OnTriggerEnter(Collider other)
     {
         if (other.CompareTag("Player"))
         {
+            playerInside = true;
             infoCard.SetActive(true);
         }
     }
@@ -41,14 +53,19 @@ public class InfoCardTrigger : MonoBehaviour
     {
         if (other.CompareTag("Player"))
         {
+            playerInside = false;
             infoCard.SetActive(false);
         }
     }
 
-    // Called by Hear More button
+    private void OnPlayAction(InputAction.CallbackContext ctx)
+    {
+        if (playerInside) PlayAudioInfo();
+    }
+
     public void PlayAudioInfo()
     {
-        if (audioSource != null)
+        if (audioSource != null && !audioSource.isPlaying)
             audioSource.Play();
     }
 }

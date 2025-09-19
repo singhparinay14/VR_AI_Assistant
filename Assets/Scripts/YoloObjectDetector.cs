@@ -70,7 +70,7 @@ public class YoloObjectDetector : MonoBehaviour
 
     public event Action<List<DetectionInfo>> OnDetections;
 
-    // Your fine-tuned labels (keep order aligned with the model export)
+    // Fine-tuned car labels (order must match the model)
     private readonly string[] carLabels = {
         "Ford Mustang GT Convertible 2020",
         "Audi R8 2014",
@@ -84,6 +84,12 @@ public class YoloObjectDetector : MonoBehaviour
         "Tesla Cybertruck"
     };
 
+    struct Raw
+    {
+        public int cls;
+        public float conf, cxN, cyN, wN, hN;
+    }
+
     private List<DetectionInfo> latestDetections = new();
 
     void Awake()
@@ -92,7 +98,6 @@ public class YoloObjectDetector : MonoBehaviour
         if (visionRTs == null || visionRTs.Length != visionCameras.Length)
             visionRTs = new RenderTexture[visionCameras.Length];
 
-        // Create/bind one persistent RT per camera and assign once
         for (int i = 0; i < visionCameras.Length; i++)
         {
             var cam = visionCameras[i];
@@ -195,9 +200,6 @@ public class YoloObjectDetector : MonoBehaviour
 
     private List<DetectionInfo> ParseDetections(Worker worker, Camera cam)
     {
-        int raycastsDone = 0;
-        int raycastCap = (maxDetectionsPerCamera > 0) ? maxDetectionsPerCamera : int.MaxValue;
-
         var detections = new List<DetectionInfo>(16);
 
         var output = worker.PeekOutput() as Tensor<float>;
@@ -205,154 +207,182 @@ public class YoloObjectDetector : MonoBehaviour
 
         using var cpu = output.ReadbackAndClone();
 
+        // --- infer layout ---
         int A = cpu.shape[1];
         int B = cpu.shape[2];
-        bool channelsFirst = (A <= B);
-        int numBoxes = channelsFirst ? B : A;
-        int numAttrs = channelsFirst ? A : B;
+        int numAttrs = Mathf.Min(A, B);
+        int numBoxes = Mathf.Max(A, B);
+        bool channelsFirst = (A < B);
 
         int classes = carLabels.Length;
         bool hasObj = (numAttrs == (5 + classes));
         int clsStart = hasObj ? 5 : 4;
 
-        for (int i = 0; i < numBoxes; i++)
-        {
-            float cx, cy, w, h, obj = 1f;
+        // 1) Collect raw predictions (no raycasts yet)
 
+        var raw = new List<Raw>(numBoxes);
+
+        for (int i = 0; i<numBoxes; i++)
+        {
+            // bbox
+            float cx, cy, w, h, obj = 1f;
             if (channelsFirst)
             {
-                cx = cpu[0, 0, i]; cy = cpu[0, 1, i];
-                w = cpu[0, 2, i]; h = cpu[0, 3, i];
-                if (hasObj) obj = Sigmoid(cpu[0, 4, i]);
+                cx = cpu[0, 0, i]; cy = cpu[0, 1, i]; w = cpu[0, 2, i]; h = cpu[0, 3, i];
+                if (hasObj) obj = 1f / (1f + Mathf.Exp(-cpu[0, 4, i]));
             }
             else
             {
-                cx = cpu[0, i, 0]; cy = cpu[0, i, 1];
-                w = cpu[0, i, 2]; h = cpu[0, i, 3];
-                if (hasObj) obj = Sigmoid(cpu[0, i, 4]);
+                cx = cpu[0, i, 0]; cy = cpu[0, i, 1]; w = cpu[0, i, 2]; h = cpu[0, i, 3];
+                if (hasObj) obj = 1f / (1f + Mathf.Exp(-cpu[0, i, 4]));
             }
 
+            // best class
             int bestClass = -1; float bestScore = 0f;
             for (int c = clsStart; c < numAttrs; c++)
             {
                 float s = channelsFirst ? cpu[0, c, i] : cpu[0, i, c];
-                s = Sigmoid(s);
+                s = 1f / (1f + Mathf.Exp(-s));
                 if (s > bestScore) { bestScore = s; bestClass = c - clsStart; }
             }
 
-            float confidence = hasObj ? Mathf.Sqrt(obj * bestScore) : bestScore;
-            if (confidence < confidenceThreshold) continue;
+            float conf = hasObj ? Mathf.Sqrt(obj * bestScore) : bestScore;
+            if (conf < confidenceThreshold) continue;
             if (bestClass < 0 || bestClass >= classes) continue;
 
-            string label = carLabels[bestClass];
+            // normalize regardless of export style (pixels vs normalized)
+            bool inPixels = (Mathf.Abs(cx) > 2f || Mathf.Abs(cy) > 2f || Mathf.Abs(w) > 2f || Mathf.Abs(h) > 2f);
+            float cxN = inPixels ? cx / inputWidth : cx;
+            float cyN = inPixels ? cy / inputHeight : cy;
+            float wN = inPixels ? w / inputWidth : w;
+            float hN = inPixels ? h / inputHeight : h;
 
-            // model space -> camera pixel space
-            float x = (cx - w * 0.5f) / inputWidth * cam.pixelWidth;
-            float y = (cy - h * 0.5f) / inputHeight * cam.pixelHeight;
-            float bw = w / inputWidth * cam.pixelWidth;
-            float bh = h / inputHeight * cam.pixelHeight;
-            Rect bbox = new Rect(x, y, bw, bh);
+            raw.Add(new Raw { cls = bestClass, conf = conf, cxN = cxN, cyN = cyN, wN = wN, hN = hN });
+        }
 
-            if (raycastsDone >= raycastCap) continue;
+        if (raw.Count == 0) return detections;
 
-            // === Ray from YOLO's normalized center ===
-            float vx = cx / inputWidth;   // cx,cy are in model pixels (0..inputWidth/Height)
-            float vy = cy / inputHeight;
-            if (invertYForRay) vy = 1f - vy;
+        // 2) Keep only the strongest few before any raycasts (perf!)
+        int cap = (maxDetectionsPerCamera > 0) ? Mathf.Max(1, maxDetectionsPerCamera * 2) : Mathf.Min(50, raw.Count);
+        raw = raw.OrderByDescending(r => r.conf).Take(cap).ToList();
+
+        // 3) Raycast the kept predictions
+        int raycastsDone = 0;
+        int raycastCap = (maxDetectionsPerCamera > 0) ? maxDetectionsPerCamera : int.MaxValue;
+        float castLen = GetCastLength(cam);
+
+        foreach (var r in raw)
+        {
+            if (raycastsDone >= raycastCap) break;
+
+            // viewport center (normalized) → ray
+            float vx = r.cxN;
+            float vy = invertYForRay ? 1f - r.cyN : r.cyN;
 
             Ray ray = cam.ViewportPointToRay(new Vector3(vx, vy, 0f));
-            float castLen = GetCastLength(cam);
-
-            // Hit triggers too (many imported prefabs use trigger colliders)
             bool hitOk = Physics.Raycast(ray, out RaycastHit hit, castLen, hitMask, QueryTriggerInteraction.Collide);
-
-            // If the center misses useful geometry (or obviously hits a big plane), probe twice more
-            if (!hitOk || (hit.collider != null && hit.collider.bounds.size.y < 0.05f)) // likely floor/wall plane
-            {
-                // Left and right thirds of the bbox
-                float vxL = ((cx - w * 0.25f) / inputWidth);
-                float vxR = ((cx + w * 0.25f) / inputWidth);
-                float vyC = vy;
-
-                Ray rL = cam.ViewportPointToRay(new Vector3(vxL, vyC, 0f));
-                Ray rR = cam.ViewportPointToRay(new Vector3(vxR, vyC, 0f));
-
-                RaycastHit hL, hR;
-                bool okL = Physics.Raycast(rL, out hL, castLen, hitMask, QueryTriggerInteraction.Collide);
-                bool okR = Physics.Raycast(rR, out hR, castLen, hitMask, QueryTriggerInteraction.Collide);
-
-                // Pick the best of (center, left, right)
-                if (okL && (!hitOk || hL.distance < hit.distance)) { hit = hL; hitOk = true; ray = rL; }
-                if (okR && (!hitOk || hR.distance < hit.distance)) { hit = hR; hitOk = true; ray = rR; }
-            }
-
-
             raycastsDone++;
 
-            // Use root name so sub-colliders (wheel/body) collapse to one object
+            // Fallback: small spherecast along the same ray to catch body panels near the center-line
+            if ((!hitOk || IsLikelyFloorOrWall(hit)) && r.wN > 0.02f)
+            {
+                const float radius = 0.20f; // ~20cm
+                if (Physics.SphereCast(ray, radius, out RaycastHit sh, castLen, hitMask, QueryTriggerInteraction.Collide))
+                {
+                    hit = sh;
+                    hitOk = true;
+                }
+                else
+                {
+                    // last try: left/right thirds of the bbox
+                    float vxL = Mathf.Clamp01(r.cxN - r.wN * 0.25f);
+                    float vxR = Mathf.Clamp01(r.cxN + r.wN * 0.25f);
+                    Ray rL = cam.ViewportPointToRay(new Vector3(vxL, vy, 0f));
+                    Ray rR = cam.ViewportPointToRay(new Vector3(vxR, vy, 0f));
+
+                    bool okL = Physics.Raycast(rL, out RaycastHit hL, castLen, hitMask, QueryTriggerInteraction.Collide);
+                    bool okR = Physics.Raycast(rR, out RaycastHit hR, castLen, hitMask, QueryTriggerInteraction.Collide);
+
+                    if (okL && (!hitOk || hL.distance < hit.distance)) { ray = rL; hit = hL; hitOk = true; }
+                    if (okR && (!hitOk || hR.distance < hit.distance)) { ray = rR; hit = hR; hitOk = true; }
+                }
+            }
+
+            // Normalize identity to the object's root so duplicates from sub-colliders collapse
             Transform root = hitOk ? hit.collider.transform.root : null;
             string surfaceName = hitOk ? (root != null ? root.name : hit.collider.name) : "nohit";
 
+
+            // pixel bbox (for UI/logging)
+            float xPix = (r.cxN - r.wN * 0.5f) * cam.pixelWidth;
+            float yPix = (r.cyN - r.hN * 0.5f) * cam.pixelHeight;
+            float wPix = r.wN * cam.pixelWidth;
+            float hPix = r.hN * cam.pixelHeight;
+            Rect bbox = new Rect(xPix, yPix, wPix, hPix);
+
             var det = new DetectionInfo
             {
-                label = label,
+                label = carLabels[r.cls],
                 bbox = bbox,
                 colour = enableColourSampling ? SampleColour(bbox, cam) : "gray",
-                worldPos = hitOk ? hit.point : cam.transform.position + cam.transform.forward * 2f,
+                worldPos = hitOk ? hit.point : (cam.transform.position + cam.transform.forward * 2f),
                 distance = hitOk ? hit.distance : -1f,
-                relDir = GetRelativeDirection(cam, hitOk ? hit.point : cam.transform.position + cam.transform.forward * 2f),
+                relDir = GetRelativeDirection(cam, hitOk ? hit.point : (cam.transform.position + cam.transform.forward * 2f)),
                 surface = surfaceName,
-                confidence = confidence
+                confidence = r.conf
             };
 
             detections.Add(det);
 
             if (logDetections)
-                Debug.Log($"[YOLO-cars] {det.label} {det.confidence:0.00} hit={hitOk} @ {det.worldPos}");
+                Debug.Log($"[YOLO-cars] {det.label} {det.confidence:0.50} hit={hitOk} @ {det.worldPos} (vx={vx:0.02}, vy={vy:0.02})");
         }
 
-        // NMS on bbox (per label)
+        // 4) NMS per label
         var kept = ApplyNMS(detections, 0.7f);
 
-#if UNITY_EDITOR
-        if (drawRays && drawAfterNMS)
-        {
-            int drawn = 0;
-            foreach (var d in kept.OrderByDescending(k => k.confidence))
+        #if UNITY_EDITOR
+            if (drawRays && drawAfterNMS)
             {
-                if (drawn >= Mathf.Max(1, maxRaysDrawn)) break;
-
-                float vx = (d.bbox.x + d.bbox.width * 0.5f) / cam.pixelWidth;
-                float vy = (d.bbox.y + d.bbox.height * 0.5f) / cam.pixelHeight;
-                if (invertYForRay) vy = 1f - vy;
-
-                var r2 = cam.ViewportPointToRay(new Vector3(vx, vy, 0f));
-                float castLen = GetCastLength(cam);
-                bool hitNow = Physics.Raycast(r2, out RaycastHit h2, castLen, hitMask);
-
-                Debug.DrawRay(r2.origin, r2.direction * (hitNow ? h2.distance : castLen),
-                              hitNow ? rayHitColor : rayMissColor, rayDuration);
-
-                if (hitNow)
+                int drawn = 0;
+                foreach (var d in kept.OrderByDescending(k => k.confidence))
                 {
-                    Debug.DrawLine(h2.point + Vector3.up * 0.05f,       h2.point - Vector3.up * 0.05f,       hitMarkerColor, rayDuration);
-                    Debug.DrawLine(h2.point + Vector3.right * 0.05f,    h2.point - Vector3.right * 0.05f,    hitMarkerColor, rayDuration);
-                    Debug.DrawLine(h2.point + Vector3.forward * 0.05f,  h2.point - Vector3.forward * 0.05f,  hitMarkerColor, rayDuration);
-                }
+                    if (drawn >= Mathf.Max(1, maxRaysDrawn)) break;
 
-                drawn++;
+                    // rebuild the ray from bbox center for viz
+                    float vx = (d.bbox.x + d.bbox.width * 0.5f) / cam.pixelWidth;
+                    float vy = (d.bbox.y + d.bbox.height * 0.5f) / cam.pixelHeight;
+                    if (invertYForRay) vy = 1f - vy;
+
+                    var r2 = cam.ViewportPointToRay(new Vector3(vx, vy, 0f));
+                    float length = (d.distance >= 0f) ? d.distance : castLen;  // no extra Physics.Raycast here
+                    Debug.DrawRay(r2.origin, r2.direction * length, (d.distance >= 0f) ? rayHitColor : rayMissColor, rayDuration);
+
+                    if (d.distance >= 0f)
+                    {
+                        Debug.DrawLine(d.worldPos + Vector3.up * 0.05f,       d.worldPos - Vector3.up * 0.05f,       hitMarkerColor, rayDuration);
+                        Debug.DrawLine(d.worldPos + Vector3.right * 0.05f,    d.worldPos - Vector3.right * 0.05f,    hitMarkerColor, rayDuration);
+                        Debug.DrawLine(d.worldPos + Vector3.forward * 0.05f,  d.worldPos - Vector3.forward * 0.05f,  hitMarkerColor, rayDuration);
+                    }
+                    drawn++;
+                }
             }
-        }
-#endif
+        #endif
 
         return kept;
     }
 
-    private float GetCastLength(Camera cam)
+
+    private static bool IsLikelyFloorOrWall(RaycastHit hit)
     {
-        // match PropsDetector: cast across the camera range
-        return Mathf.Max(0.1f, cam.farClipPlane - cam.nearClipPlane);
+        if (hit.collider == null) return true;
+        var b = hit.collider.bounds;
+        // very thin in one dimension -> large plane (floor/wall)
+        return (b.size.y < 0.05f) || (b.size.x > 50f) || (b.size.z > 50f);
     }
+
+    private float GetCastLength(Camera cam)
+        => Mathf.Max(0.1f, cam.farClipPlane - cam.nearClipPlane);
 
     private float Sigmoid(float x) => 1f / (1f + Mathf.Exp(-x));
 
@@ -403,7 +433,6 @@ public class YoloObjectDetector : MonoBehaviour
     private List<DetectionInfo> ApplyNMS(List<DetectionInfo> detections, float iouThreshold = 0.45f)
     {
         var results = new List<DetectionInfo>();
-        // NMS per label to avoid cross-class suppression
         var byLabel = detections.GroupBy(d => d.label);
         foreach (var grp in byLabel)
         {

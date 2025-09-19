@@ -11,11 +11,19 @@ public class BotNavigator : MonoBehaviour
 
     public void MoveToTarget(Vector3 targetPos)
     {
+        if (agent == null) return;
+
         agent.SetDestination(targetPos);
         isMoving = true;
 
+        // Ensure the path is drawn from the bot's current position
         if (pathDrawer != null)
+        {
+            if (pathDrawer.startPoint == null)
+                pathDrawer.startPoint = this.transform; // draw from bot by default
+
             pathDrawer.DrawPathTo(targetPos);
+        }
     }
 
     private void Update()
@@ -28,7 +36,7 @@ public class BotNavigator : MonoBehaviour
         }
 
         // Stop movement check
-        if (isMoving && !agent.pathPending && agent.remainingDistance <= agent.stoppingDistance)
+        if (isMoving && agent != null && !agent.pathPending && agent.remainingDistance <= agent.stoppingDistance)
         {
             if (!agent.hasPath || agent.velocity.sqrMagnitude == 0f)
             {

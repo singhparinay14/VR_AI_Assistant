@@ -1,0 +1,45 @@
+{
+    "name": "GalleryNonAI",
+    "maps": [
+        {
+            "name": "RightHand",
+            "id": "bd62e704-981f-4837-aba9-1d455f824baa",
+            "actions": [
+                {
+                    "name": "PlayInfo",
+                    "type": "Button",
+                    "id": "299d6d91-7e6d-45fb-add5-1839ec612678",
+                    "expectedControlType": "",
+                    "processors": "",
+                    "interactions": "Press",
+                    "initialStateCheck": false
+                }
+            ],
+            "bindings": [
+                {
+                    "name": "",
+                    "id": "efb3cc34-d69a-418e-8c00-b3c283a401d8",
+                    "path": "<OculusTouchController>{RightHand}/primaryButton",
+                    "interactions": "",
+                    "processors": "",
+                    "groups": "",
+                    "action": "PlayInfo",
+                    "isComposite": false,
+                    "isPartOfComposite": false
+                },
+                {
+                    "name": "",
+                    "id": "ab8f2905-a61c-4558-916f-37f1d540026f",
+                    "path": "",
+                    "interactions": "",
+                    "processors": "",
+                    "groups": "",
+                    "action": "PlayInfo",
+                    "isComposite": false,
+                    "isPartOfComposite": false
+                }
+            ]
+        }
+    ],
+    "controlSchemes": []
+}
