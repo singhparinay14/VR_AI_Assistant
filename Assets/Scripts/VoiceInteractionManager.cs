@@ -1,7 +1,9 @@
 using System.Collections;
+using System.Diagnostics;
 using UnityEngine;
 using UnityEngine.InputSystem; // NEW
 using UnityEngine.UI;
+using Debug = UnityEngine.Debug;
 
 public class VoiceInteractionManager : MonoBehaviour
 {
@@ -24,22 +26,42 @@ public class VoiceInteractionManager : MonoBehaviour
 
     private bool isRecording = false;
 
-    void OnEnable() // NEW
+    void OnEnable()
     {
-        if (micToggleAction.reference != null)
+        var action = micToggleAction.action;          // ✅ works for inline OR asset reference
+        if (action != null)
         {
-            micToggleAction.action.performed += OnMicTogglePerformed;
-            micToggleAction.action.Enable();
+            action.started += OnMicStarted;          // A button down
+            action.canceled += OnMicCanceled;         // A button up
+            action.Enable();
+        }
+        else
+        {
+            Debug.LogWarning("VoiceInteractionManager: Mic Toggle action is not assigned.");
         }
     }
 
-    void OnDisable() // NEW
+    void OnDisable()
     {
-        if (micToggleAction.reference != null)
+        var action = micToggleAction.action;
+        if (action != null)
         {
-            micToggleAction.action.performed -= OnMicTogglePerformed;
-            micToggleAction.action.Disable();
+            action.started -= OnMicStarted;
+            action.canceled -= OnMicCanceled;
+            action.Disable();
         }
+    }
+
+    private void OnMicStarted(InputAction.CallbackContext ctx)
+    {
+        Debug.Log("[PTT] A down");
+        if (!isRecording) StartVoiceRecording();
+    }
+
+    private void OnMicCanceled(InputAction.CallbackContext ctx)
+    {
+        Debug.Log("[PTT] A up");
+        if (isRecording) StopAndProcessRecording();
     }
 
     void Start()
@@ -99,10 +121,17 @@ public class VoiceInteractionManager : MonoBehaviour
         yield return whisperTranscriber.TranscribeAudio(voiceRecorder.recordedFilePath, (string transcription) =>
         {
             Debug.Log("Transcription: " + transcription);
-            botAI.DisplayUserMessage(transcription);
 
-            if (!string.IsNullOrWhiteSpace(transcription))
+            // Only proceed if we got real text (non-empty and not our error line)
+            if (!string.IsNullOrWhiteSpace(transcription) && !transcription.StartsWith("Sorry"))
+            {
+                botAI.DisplayUserMessage(transcription);
                 StartCoroutine(DelayedSend(transcription));
+            }
+            else
+            {
+                botAI.DisplayAIMessage("I couldn't hear that. Please try again.");
+            }
         });
     }
 

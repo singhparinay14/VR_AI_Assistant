@@ -21,6 +21,8 @@ public class ChatGPTManager : MonoBehaviour
     [Header("Policy")]
     public bool ignoreColors = true;
 
+    [SerializeField] private bool autoResolveAmbiguity = true;
+    
     [Header("Vision Link")]
     [SerializeField] private List<YoloObjectDetector> detectors = new();   // cars
     [SerializeField] private List<PropsDetector> propDetectors = new();    // props
@@ -524,8 +526,14 @@ public class ChatGPTManager : MonoBehaviour
         candidates = merged;
 
         if (candidates.Count == 0) { Debug.LogWarning($"[Nav] No detections for '{targetLabel}'."); return; }
+
         if (candidates.Count > 1 && !HasDisambiguationClues(userMessage))
-        { if (navDebugLogs) Debug.Log($"[Nav] Ambiguous '{targetLabel}' with {candidates.Count} matches; waiting for qualifier."); return; }
+        {
+            if (navDebugLogs)
+                Debug.Log($"[Nav] Ambiguous '{targetLabel}' with {candidates.Count} matches; " +
+                          (autoResolveAmbiguity ? "auto-resolving." : "waiting for qualifier."));
+            if (!autoResolveAmbiguity) return;
+        }
 
         var surfaceMatched = candidates.Where(d => MatchesSurface(d, targetLabel)).ToList();
         if (surfaceMatched.Count > 0) candidates = surfaceMatched;

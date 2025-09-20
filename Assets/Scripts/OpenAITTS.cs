@@ -1,8 +1,11 @@
+using Newtonsoft.Json;
 using System.Collections;
+using System.Diagnostics;
 using System.IO;
 using UnityEngine;
 using UnityEngine.Networking;
-using Newtonsoft.Json;
+using static System.Net.Mime.MediaTypeNames;
+using Debug = UnityEngine.Debug;
 
 [RequireComponent(typeof(AudioSource))]
 public class OpenAITTS : MonoBehaviour
@@ -63,7 +66,8 @@ public class OpenAITTS : MonoBehaviour
             yield break;
         }
 
-        string filePath = Path.Combine(Application.persistentDataPath, "response.mp3");
+        string filePath = Path.Combine(UnityEngine.Application.persistentDataPath, "response.mp3");
+
         File.WriteAllBytes(filePath, request.downloadHandler.data);
 
         yield return StartCoroutine(PlayAudio(filePath));

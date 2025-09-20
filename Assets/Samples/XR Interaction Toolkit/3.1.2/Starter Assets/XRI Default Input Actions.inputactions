@@ -1983,7 +1983,7 @@
                     "name": "Activate",
                     "type": "Button",
                     "id": "41976d89-60de-4deb-bff9-16b4af96b290",
-                    "expectedControlType": "",
+                    "expectedControlType": "Button",
                     "processors": "",
                     "interactions": "",
                     "initialStateCheck": false
@@ -2074,7 +2074,7 @@
                 {
                     "name": "",
                     "id": "1ce80054-410d-4112-a332-50faa7fb4f23",
-                    "path": "<OculusTouchController>{RightHand}/triggerPressed",
+                    "path": "<XRController>{RightHand}/{GripButton}",
                     "interactions": "",
                     "processors": "",
                     "groups": "",
@@ -2195,7 +2195,7 @@
                 {
                     "name": "",
                     "id": "fa59aed1-ae0b-4074-a58c-294b85f46228",
-                    "path": "<OculusTouchController>{RightHand}/primaryButton",
+                    "path": "<XRController>{RightHand}/{TriggerButton}",
                     "interactions": "",
                     "processors": "",
                     "groups": "",
@@ -2443,7 +2443,7 @@
                     "name": "Jump",
                     "type": "Button",
                     "id": "01c7fda4-9c15-4167-8b87-58024f21d903",
-                    "expectedControlType": "Button",
+                    "expectedControlType": "",
                     "processors": "",
                     "interactions": "",
                     "initialStateCheck": false
@@ -3400,27 +3400,27 @@
         },
         {
             "name": "Voice",
-            "id": "40fe614a-2fda-4ac7-b195-d2c2e474b158",
+            "id": "74f87d76-2af5-4284-b1e5-cb225f9b3d3e",
             "actions": [
                 {
-                    "name": "Toggle Record",
+                    "name": "PushToTalk",
                     "type": "Button",
-                    "id": "74ba2362-3c0d-46fe-8b59-e841dd862b5a",
+                    "id": "1f72da24-96e8-4197-870d-7c3beb10c614",
                     "expectedControlType": "",
                     "processors": "",
-                    "interactions": "Press",
+                    "interactions": "",
                     "initialStateCheck": false
                 }
             ],
             "bindings": [
                 {
                     "name": "",
-                    "id": "409c61ed-5b70-4b6d-81df-618b5d44744d",
-                    "path": "<OculusTouchController>{RightHand}/primaryButton",
-                    "interactions": "",
+                    "id": "b03a7dec-0530-4108-afca-932a1ff239a4",
+                    "path": "<XRController>{RightHand}/{PrimaryButton}",
+                    "interactions": "Press(behavior=2)",
                     "processors": "",
                     "groups": "",
-                    "action": "Toggle Record",
+                    "action": "PushToTalk",
                     "isComposite": false,
                     "isPartOfComposite": false
                 }
