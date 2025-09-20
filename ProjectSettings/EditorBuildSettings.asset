@@ -8,18 +8,21 @@ EditorBuildSettings:
   - enabled: 0
     path: Assets/Scenes/Discarded Scenes/SampleScene.unity
     guid: 99c9720ab356a0642a771bea13969a05
-  - enabled: 1
+  - enabled: 0
     path: Assets/Scenes/OpenWorld.unity
     guid: fdedadb48a644f340b993810f63ee5c5
-  - enabled: 1
+  - enabled: 0
     path: Assets/Scenes/Discarded Scenes/Gallery_AI_Expanded.unity
     guid: 02348965dfff5bf458330e8df4ab150c
-  - enabled: 1
+  - enabled: 0
     path: Assets/Scenes/Discarded Scenes/Gallery_NonAI.unity
     guid: 9ce0adbb6f950084faf59fb021796a0e
-  - enabled: 1
+  - enabled: 0
     path: Assets/Scenes/Discarded Scenes/Gallery_AI.unity
     guid: 8b9854a8d18d0664ca977b32e4c8479d
+  - enabled: 1
+    path: Assets/Scenes/Gallery_AI_Expanded Backup.unity
+    guid: d99e4453fa594674bbb7af0b6760336f
   m_configObjects:
     Unity.XR.Oculus.Settings: {fileID: 11400000, guid: 6f11c0e9306673147bdaca76204c64c2, type: 2}
     com.unity.input.settings: {fileID: 11400000, guid: 9d00d46b7d8190f41b39703b178c9690, type: 2}
