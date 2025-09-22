@@ -8369,7 +8369,7 @@ MonoBehaviour:
   audioSource: {fileID: 669049139}
   model: gpt-4o-mini-tts
   voice: alloy
-  format: wav
+  responseFormat: wav
   logHeaders: 1
   logFirstBytes: 1
 --- !u!114 &669049144
@@ -9094,7 +9094,7 @@ RectTransform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 726054807}
   m_LocalRotation: {x: 0, y: -0.7071068, z: 0, w: 0.7071068}
-  m_LocalPosition: {x: 0, y: 0, z: -49.320007}
+  m_LocalPosition: {x: 0, y: 0, z: -71.82}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -9102,7 +9102,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: -90, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: 35.259995, y: 2.5199986}
+  m_AnchoredPosition: {x: 35.259995, y: 3.66}
   m_SizeDelta: {x: 16.75, y: 4.5}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!1 &736776757
@@ -9225,7 +9225,7 @@ MonoBehaviour:
   m_TargetGraphic: {fileID: 2073618402}
   m_HandleRect: {fileID: 2073618401}
   m_Direction: 0
-  m_Value: 0
+  m_Value: 1
   m_Size: 1
   m_NumberOfSteps: 0
   m_OnValueChanged:
@@ -10150,7 +10150,7 @@ MonoBehaviour:
   audioSource: {fileID: 909383307}
   model: tts-1
   voice: alloy
-  format: wav
+  responseFormat: mp3
   logHeaders: 1
   logFirstBytes: 1
 --- !u!82 &909383307
@@ -15474,7 +15474,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0, y: 0}
   m_AnchorMax: {x: 0, y: 0}
-  m_AnchoredPosition: {x: 46.62, y: 3.72}
+  m_AnchoredPosition: {x: 43.76, y: 3.72}
   m_SizeDelta: {x: 962.3, y: 611.7}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!1001 &1530795352
